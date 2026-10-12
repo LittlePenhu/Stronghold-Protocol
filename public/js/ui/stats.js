@@ -285,8 +285,14 @@ const COMPACT_FRAME = ['id', 'v', 't', 'end', 'victory', 'roundsPassed', 'lastRo
   'difficulty', 'roomMode', 'durationMs', 'selfId'];
 
 /**
- * The compact form of a record: the frame and the player's OWN row without lineup, bonds and name — everything the
- * aggregates and the history list read, nothing a replay needs. Teammates are gone. Idempotent.
+ * The compact form of a record: the frame, the player's OWN row, and a **slimmed lineup / bond list** — everything the
+ * aggregates (including the 排行 rankings) and the history list read, nothing a replay needs. Teammates are gone.
+ *
+ * The lineup / bonds are kept because the rankings (惯用干员, 惯用羁绊, 羁绊胜率, 羁绊最高层数) read them, and before
+ * 0.2.4 they were dropped here — which capped those four stats at the newest FULL_KEEP matches. Only the fields a
+ * statistic needs survive: an operator's id (and `kind`, so summons stay distinguishable) and a bond's
+ * `bondId` / `layers` / `active`. Tile position, items, golden, diy and standInFor are replay-only and go.
+ * Idempotent.
  * @param {any} rec a normalized record
  * @returns {any}
  */
@@ -298,6 +304,8 @@ export function compactRecord(rec) {
   out.players = self ? [{
     playerId: self.playerId, seat: self.seat, alive: self.alive, victory: self.victory, roundsPassed: self.roundsPassed,
     eliminatedRound: self.eliminatedRound, bandId: self.bandId, title: self.title, left: self.left, stats: self.stats,
+    lineup: (self.lineup || []).map((u) => (u.kind === 'token' ? { id: u.id, kind: 'token' } : { id: u.id })),
+    bonds: (self.bonds || []).map((b) => ({ bondId: b.bondId, layers: b.layers, active: b.active })),
   }] : [];
   return out;
 }
@@ -640,6 +648,73 @@ export function exportStats(stats) {
 
 const SELF_STATS = ['dmgDealt', 'kills', 'bossDamage', 'activatedLayers', 'merges', 'itemsEquipped', 'gold', 'perfectRounds', 'refreshes', 'leaks', 'lpLost'];
 
+// ---- 排行（排行榜）用的常量与排序 ----------------------------------------------------------------------------------
+
+/**
+ * 「后期对局」的回合门槛：局平均领袖伤害只统计打到这个回合数及以后的对局。
+ *
+ * 依据：领袖伤害主要产生在第 14 回合的最终攻势（README：14 回合 + 第 15 回合「隐秘核心」），
+ * 打到 13 回合之后才有可比性 —— 更早结束的对局 bossDamage 基本是 0，混进均值只会把它拉平。
+ * 注意这是**回合数**（roundsPassed，per-player），不是盟约叠层（activatedLayers）。
+ */
+export const LATE_GAME_ROUND = 13;
+
+/** 惯用干员 / 惯用羁绊榜单取前几名。 */
+export const RANK_TOP_N = 5;
+
+/**
+ * 分组胜率榜的确定性排序：样本达标优先 → 胜率降序 → 局数降序 → id 升序。
+ *
+ * 「样本达标」（games >= minGames）排在前面，是为了让只打过 1 局却 100% 的地图沉到后面 ——
+ * 但**不隐藏**它：表里仍然有这一行，否则用户会以为数据丢了。
+ *
+ * 为什么最后一定有 id 兜底：表格若只按数值排，并列项的顺序取决于输入顺序（记录按时间排），
+ * 导入合并或聚合顺序一变就会互换位置 —— 同一份数据两次打开排出不同的榜。加上 id，结果永远一致。
+ * @param {Record<string, {games: number, wins: number}>} groups
+ * @param {{ minGames?: number }} [opts]
+ * @returns {[string, {games: number, wins: number}][]}
+ */
+export function rankByRate(groups, { minGames = 1 } = {}) {
+  return Object.entries(groups).sort((a, b) => {
+    const okA = a[1].games >= minGames ? 1 : 0;
+    const okB = b[1].games >= minGames ? 1 : 0;
+    if (okA !== okB) return okB - okA;
+    const rateA = a[1].games ? a[1].wins / a[1].games : -1;
+    const rateB = b[1].games ? b[1].wins / b[1].games : -1;
+    if (rateA !== rateB) return rateB - rateA;
+    if (a[1].games !== b[1].games) return b[1].games - a[1].games;
+    return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+  });
+}
+
+/**
+ * 通用榜单排序：主键降序 → 次键降序 → id 升序（理由同 rankByRate）。
+ * @param {[string, any][]} entries
+ * @param {(v: any) => number} primary
+ * @param {(v: any) => number} [secondary]
+ * @returns {[string, any][]}
+ */
+export function rankEntries(entries, primary, secondary = null) {
+  return entries.slice().sort((a, b) =>
+    (primary(b[1]) - primary(a[1]))
+    || (secondary ? secondary(b[1]) - secondary(a[1]) : 0)
+    || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+}
+
+/**
+ * 取前 `n` 名，**并列在边界上的全部收录** —— 第 5 名和第 6 名数值相同时会出现第 6 行。
+ * 宁可多画一行，也不要静默地砍掉一个同样常用的干员。`ranked` 必须已经排好序。
+ * @param {[string, any][]} ranked
+ * @param {(v: any) => number} value
+ * @param {number} [n]
+ * @returns {[string, any][]}
+ */
+export function takeTop(ranked, value, n = RANK_TOP_N) {
+  if (ranked.length <= n) return ranked;
+  const cut = value(ranked[n - 1][1]);
+  return ranked.filter((e) => value(e[1]) >= cut);
+}
+
 /**
  * The row that "is me" in a record: selfId, else the only human, else seat 0 — records written by
  * recordResult always have selfId; the fallbacks only serve imported / hand-made data.
@@ -685,8 +760,16 @@ export function countsTowardStats(rec) {
 
 /**
  * Aggregate records for the stats page — over the records that count; `total` / `excluded` say how many did not.
- * Everything is keyed by ids (bandId / titleId / difficulty); the page maps them to names and icons through the game
- * data. The combat totals read the settled records' stat blocks (a quit record has none).
+ * Everything is keyed by ids (bandId / stageId / bossId / bondId / difficulty); the page maps them to names and icons
+ * through the game data. The combat totals read the settled records' stat blocks (a quit record has none).
+ *
+ * The 排行 rankings share this one pass (no second O(n) scan): `stages` / `bosses` / `hiddenBosses` are per-group
+ * win rates; `chars` / `bonds` read the self row's lineup and active bonds; `averages` carries its own sample count
+ * per metric (the denominator is "records that have the number", not `count` — a quit record has no stats block, and
+ * imported or compacted rows may lack lineup / bonds entirely).
+ *
+ * `coverage` reports how many counted records actually carried lineup / bond data — the page shows it, because a
+ * 30-match history (before the 0.2.4 compaction change) and a 300-match one look identical otherwise.
  * @param {any[]} records
  * @returns {any}
  */
@@ -700,6 +783,14 @@ export function aggregateStats(records) {
     hidden: { reached: 0, cleared: 0 },
     byDifficulty: {}, byMode: { solo: 0, coop: 0 },
     titles: {}, bands: {}, sums: {},
+    // 排行
+    stages: {}, bosses: {}, hiddenBosses: {}, bonds: {}, chars: {},
+    averages: {
+      dmgDealt: { sum: 0, n: 0 },
+      bossDamage: { sum: 0, n: 0 },
+      bossDamageLate: { sum: 0, n: 0 }, // 只算 roundsPassed >= LATE_GAME_ROUND
+    },
+    coverage: { lineup: 0, bonds: 0 },
   };
   for (const rec of rs) {
     const self = selfRowOf(rec);
@@ -733,10 +824,76 @@ export function aggregateStats(records) {
       if (won) b.wins++;
     }
 
+    // 地图 / 首领 / 隐藏首领：按 id 分组的胜率。id 缺失的记录（导入的手工数据）不建组，不污染分母。
+    if (rec.stageId) {
+      const s = (out.stages[rec.stageId] ||= { games: 0, wins: 0 });
+      s.games++;
+      if (won) s.wins++;
+    }
+    if (rec.bossId) {
+      const b = (out.bosses[rec.bossId] ||= { games: 0, wins: 0 });
+      b.games++;
+      if (won) b.wins++;
+    }
+    // 隐藏首领单独一张表：只有到达隐秘核心的对局才有 hiddenBossId，并进主表会把主表的分母搅乱
+    if (rec.hiddenBossId) {
+      const h = (out.hiddenBosses[rec.hiddenBossId] ||= { games: 0, wins: 0 });
+      h.games++;
+      if (won) h.wins++;
+    }
+
+    // 战斗均值：分母是「有 stats 块的记录数」。quit 记录没有 stats（buildQuitRecord 不写），
+    // 所以这里的 n 通常小于 count —— 页面把 n 一起显示出来，不让人误以为是总局数。
     if (rec.end !== 'quit' && self && isObj(self.stats)) {
       for (const k of SELF_STATS) {
         const v = self.stats[k];
         if (Number.isFinite(v)) out.sums[k] = (out.sums[k] || 0) + v;
+      }
+      const dmg = num(self.stats.dmgDealt);
+      if (dmg != null) { out.averages.dmgDealt.sum += dmg; out.averages.dmgDealt.n++; }
+      const boss = num(self.stats.bossDamage);
+      if (boss != null) {
+        out.averages.bossDamage.sum += boss; out.averages.bossDamage.n++;
+        if (rounds >= LATE_GAME_ROUND) { out.averages.bossDamageLate.sum += boss; out.averages.bossDamageLate.n++; }
+      }
+    }
+
+    // 阵容：判断依据是「数组里到底有没有东西」，而**不是** rec.compact ——
+    // 0.2.4 起压缩记录也带着精简阵容，而升级前就压掉的旧记录是空数组（数据在写入那一刻就丢了），
+    // 两种记录都标着 compact: true，只能看内容。run 里空数组就等于「没有可统计的阵容」。
+    if (rec.end === 'quit') continue; // quit 记录本来就没有阵容（buildQuitRecord 不写）
+
+    const hasLineup = Array.isArray(self.lineup) && self.lineup.length > 0;
+    if (hasLineup) {
+      out.coverage.lineup++;
+      // 惯用干员：召唤物（kind === 'token'）不算干员。
+      // 同一局带 2 张同名算 2 次「出现」，但只算 1 局「使用」。
+      const seenChar = new Set();
+      for (const u of self.lineup) {
+        if (!u || !u.id || u.kind === 'token') continue;
+        const c = (out.chars[u.id] ||= { count: 0, games: 0 });
+        c.count++;
+        if (!seenChar.has(u.id)) { seenChar.add(u.id); c.games++; }
+      }
+    }
+
+    const hasBonds = Array.isArray(self.bonds) && self.bonds.length > 0;
+    if (hasBonds) {
+      out.coverage.bonds++;
+      // 盟约胜率按「激活了的局数」算（active === true）；
+      // 最高层数取该 bondId 出现过的最大 layers（不限于激活 —— 问的是「最高」而不是「激活时最高」）。
+      const seenBond = new Set();
+      for (const b of self.bonds) {
+        if (!b || !b.bondId) continue;
+        const g = (out.bonds[b.bondId] ||= { games: 0, wins: 0, sumLayers: 0, maxLayers: 0, maxLayersAt: null });
+        if (num(b.layers) > g.maxLayers) { g.maxLayers = num(b.layers); g.maxLayersAt = num(rec.t); }
+        if (!b.active) continue;
+        if (!seenBond.has(b.bondId)) {
+          seenBond.add(b.bondId);
+          g.games++;
+          if (won) g.wins++;
+        }
+        g.sumLayers += num(b.layers) || 0;
       }
     }
   }
