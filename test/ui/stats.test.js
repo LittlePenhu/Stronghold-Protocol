@@ -15,7 +15,7 @@ import {
   loadStats, saveStats, migrateStats, normalizeRecord, importStats, exportStats, aggregateStats, selfRowOf, roomModeOf,
   recordToResult, compactRecord, fitToBudget, countsTowardStats, roundsOf, clearedRounds, createLiveMatch, observeMatch,
   buildQuitRecord, installStatsRecorder, liveMatch, MIGRATIONS,
-  LATE_GAME_ROUND, RANK_TOP_N, rankByRate, rankEntries, takeTop,
+  LATE_GAME_ROUND, RANK_TOP_N, rankByRate, rankEntries, takeTop, withoutNoStack,
 } from '../../public/js/ui/stats.js';
 import { createStore, emptyMatch } from '../../public/js/store.js';
 import { normalizeResult } from '../../public/js/ui/gameLogic.js';
@@ -874,5 +874,68 @@ describe('local stats: recordToResult (history row → settlement re-view)', () 
     assert.equal('lastRound' in recordToResult(rec), false);
     assert.equal(recordToResult(null), null);
     assert.equal(recordToResult({ players: [] }), null);
+  });
+});
+
+describe('local stats: 不叠层的盟约（bonds.json 的 noStack）不进叠层类排行', () => {
+  // 只喂给 withoutNoStack 的查表替身：真实数据里 bondId → { name, noStack }
+  const BONDS = {
+    yanShip: { name: '炎', noStack: false },
+    sargonShip: { name: '萨尔贡', noStack: false },
+    // 这四条是 bonds.json 里仅有的 noStack: true（游戏机制上不叠层，游戏自己也不显示层数）
+    maniShip: { name: '调和', noStack: true },
+    emptyShip: { name: '协防干员', noStack: true },
+    soloShip: { name: '独行', noStack: true },
+    suntShip: { name: '绝技', noStack: true },
+  };
+  const bondOf = (id) => BONDS[id];
+  const ids = (entries) => entries.map(([id]) => id);
+
+  test('剔掉 noStack 的，保留其余的', () => {
+    const entries = [['yanShip', {}], ['suntShip', {}], ['sargonShip', {}], ['soloShip', {}], ['maniShip', {}], ['emptyShip', {}]];
+    assert.deepEqual(ids(withoutNoStack(entries, bondOf)), ['yanShip', 'sargonShip']);
+  });
+
+  test('恰好就是那四条 —— 用真实的 noStack 名单钉住，防上游改了数据表后静默漂移', () => {
+    const all = Object.entries(BONDS).map(([id, v]) => [id, v]);
+    const kept = ids(withoutNoStack(all, bondOf));
+    for (const id of ['suntShip', 'soloShip', 'maniShip', 'emptyShip']) {
+      assert.equal(kept.includes(id), false, `${id} 应被剔除`);
+    }
+    assert.deepEqual(kept.sort(), ['sargonShip', 'yanShip']);
+  });
+
+  test('查表里没有这个 id 时**不剔**（宁可多显示一行，也不要凭空丢数据）', () => {
+    assert.deepEqual(ids(withoutNoStack([['unknownBond', {}]], bondOf)), ['unknownBond']);
+  });
+
+  test('入参异常时不抛：非数组给空，查表不是函数时原样返回', () => {
+    assert.deepEqual(withoutNoStack(null, bondOf), []);
+    assert.deepEqual(withoutNoStack(undefined, bondOf), []);
+    const entries = [['yanShip', {}], ['suntShip', {}]];
+    assert.deepEqual(ids(withoutNoStack(entries, null)), ['yanShip', 'suntShip']);
+  });
+
+  // 这是用户明确要求的行为：过滤发生在 takeTop **之前**，所以第 6 名会补上来。
+  // 如果哪天有人把过滤挪到 takeTop 之后，这条会红。
+  test('递补：剔掉一个之后前 5 名仍是 5 条（不是 4 条）', () => {
+    const mk = (id, games) => [id, { games, wins: 0, sumLayers: games * 3, maxLayers: games }];
+    // 按 games 降序：绝技(noStack,100) 炎(90) 萨尔贡(80) 维多利亚(70) 谢拉格(60) 拉特兰(50)
+    const raw = [
+      mk('suntShip', 100), mk('yanShip', 90), mk('sargonShip', 80),
+      mk('victoriaShip', 70), mk('kjeragShip', 60), mk('lateranoShip', 50),
+    ];
+    const ranked = (entries) => rankEntries(entries, (v) => v.games, (v) => v.sumLayers);
+
+    // 不过滤：前 5 里含「绝技」（会显示一个无意义的「平均 N 层」）
+    assert.deepEqual(
+      ids(takeTop(ranked(raw), (v) => v.games)),
+      ['suntShip', 'yanShip', 'sargonShip', 'victoriaShip', 'kjeragShip'],
+    );
+    // 过滤后：绝技被剔，第 6 名「拉特兰」补位，仍然是 5 条
+    const top = takeTop(ranked(withoutNoStack(raw, bondOf)), (v) => v.games);
+    assert.deepEqual(ids(top), ['yanShip', 'sargonShip', 'victoriaShip', 'kjeragShip', 'lateranoShip']);
+    assert.equal(top.length, 5);
+    assert.equal(ids(top).includes('suntShip'), false);
   });
 });

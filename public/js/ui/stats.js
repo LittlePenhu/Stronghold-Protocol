@@ -716,6 +716,28 @@ export function takeTop(ranked, value, n = RANK_TOP_N) {
 }
 
 /**
+ * 从「叠层类」排行里剔掉**不叠层**的盟约（`bonds.json` 的 `noStack`：独行 / 调和 / 协防干员 / 绝技 …）。
+ *
+ * 为什么必须剔：这些盟约在机制上不叠层 —— 游戏自己也不显示它们的层数
+ * （`public/js/screens/result.js` 的注释原话：「layers the game never shows」）。
+ * 所以对它们来说 `layers` 是个没有含义的副产品，出现在「羁绊最高层数」或
+ * 「平均 N 层」里就是在展示假数字。
+ *
+ * 判定读 `noStack` 字段而不是比中文名：名字是显示文案（会随语言和上游改动变），
+ * `noStack` 才是机制；而且上游以后新增不叠层的盟约时，这里会自动生效。
+ *
+ * 查表函数由调用方传进来（`gd.bond`），所以本模块仍然不依赖 DOM，可以在 Node 里直接测。
+ * @param {[string, any][]} entries `Object.entries(agg.bonds)`
+ * @param {(id: string) => any} bondOf 按 bondId 查 bonds.json 条目
+ * @returns {[string, any][]}
+ */
+export function withoutNoStack(entries, bondOf) {
+  if (!Array.isArray(entries)) return [];
+  if (typeof bondOf !== 'function') return entries;
+  return entries.filter(([id]) => !bondOf(id)?.noStack);
+}
+
+/**
  * The row that "is me" in a record: selfId, else the only human, else seat 0 — records written by
  * recordResult always have selfId; the fallbacks only serve imported / hand-made data.
  * @param {any} rec

@@ -28,7 +28,8 @@ import { ResultView } from './result.js';
 import { toast, toastError } from '../ui/toasts.js';
 import {
   loadStats, saveStats, emptyStats, importStats, exportStats, aggregateStats, countsTowardStats, selfRowOf, roundsOf,
-  recordToResult, rankByRate, rankEntries, takeTop, MAX_RECORDS, FULL_KEEP, IMPORT_MAX_CHARS, RANK_TOP_N, LATE_GAME_ROUND,
+  recordToResult, rankByRate, rankEntries, takeTop, withoutNoStack,
+  MAX_RECORDS, FULL_KEEP, IMPORT_MAX_CHARS, RANK_TOP_N, LATE_GAME_ROUND,
 } from '../ui/stats.js';
 import { t, N_ } from '../../../shared/i18n.js';
 
@@ -309,8 +310,10 @@ function Favorites({ agg, gd }) {
     (v) => v.count,
     RANK_TOP_N,
   );
-  // 「惯用羁绊」按激活局数排（没激活过的不算「用过」）
-  const bondEntries = Object.entries(agg.bonds).filter(([, v]) => v.games > 0);
+  // 「惯用羁绊」按激活局数排（没激活过的不算「用过」）。
+  // 排掉 noStack 的盟约（独行/调和/协防干员/绝技…）：它们不叠层，layers 没有机制含义，
+  // 显示「平均 N 层」是在展示假数字。过滤发生在 takeTop **之前**，所以第 6 名会补上来。
+  const bondEntries = withoutNoStack(Object.entries(agg.bonds).filter(([, v]) => v.games > 0), gd.bond);
   const bonds = takeTop(
     rankEntries(bondEntries, (v) => v.games, (v) => v.sumLayers),
     (v) => v.games,
@@ -345,8 +348,10 @@ function Favorites({ agg, gd }) {
 
 /** 羁绊最高层数榜。 */
 function BondRecords({ agg, gd }) {
-  const rows = Object.entries(agg.bonds)
-    .filter(([, v]) => v.maxLayers > 0)
+  // 排掉不叠层的盟约（独行/调和/协防干员/绝技…）：它们在机制上不叠层，游戏自己也不显示层数，
+  // 所以「最高层数」这个榜对它们不成立 —— 留在表里的那些数字是没有机制含义的副产品。
+  // 判定走 noStack 字段而不是中文名（名字会变，机制不会）。
+  const rows = withoutNoStack(Object.entries(agg.bonds).filter(([, v]) => v.maxLayers > 0), gd.bond)
     .sort((a, b) => (b[1].maxLayers - a[1].maxLayers) || ((b[1].maxLayersAt || 0) - (a[1].maxLayersAt || 0)) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   if (!rows.length) return null;
   return html`<${Section} title=${t('羁绊最高层数')} micro="BOND RECORDS">
@@ -360,7 +365,7 @@ function BondRecords({ agg, gd }) {
         </tr>`)}
       </tbody>
     </table></div>
-    <p class="st-hint">${t('层数是对局结算时的快照，不是过程峰值。')}</p>
+    <p class="st-hint">${t('层数是对局结算时的快照，不是过程峰值。')} ${t('不叠层的盟约不计入本表。')}</p>
   <//>`;
 }
 
