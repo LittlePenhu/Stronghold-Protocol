@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { DIFFICULTIES, DIFFICULTY_NAMES, DIFFICULTY_COLORS } from '../../../shared/constants.js';
 import { html, Icon, MicroLabel, Spinner, Button, confirmDialog } from '../ui/components.js';
-import { useGameData, makeLookups, BandIcon, Img } from '../ui/gameComponents.js';
+import { useGameData, makeLookups, BandIcon, BondGlyph, UnitThumb, Img } from '../ui/gameComponents.js';
 import { data, useData } from '../data.js';
 import { fmtNum } from '../ui/gameLogic.js';
 import { titleIconUrl } from '../ui/assetUrls.js';
@@ -28,7 +28,7 @@ import { ResultView } from './result.js';
 import { toast, toastError } from '../ui/toasts.js';
 import {
   loadStats, saveStats, emptyStats, importStats, exportStats, aggregateStats, countsTowardStats, selfRowOf, roundsOf,
-  recordToResult, MAX_RECORDS, FULL_KEEP, IMPORT_MAX_CHARS,
+  recordToResult, rankByRate, rankEntries, takeTop, MAX_RECORDS, FULL_KEEP, IMPORT_MAX_CHARS, RANK_TOP_N, LATE_GAME_ROUND,
 } from '../ui/stats.js';
 import { t, N_ } from '../../../shared/i18n.js';
 
@@ -37,7 +37,7 @@ const cx = (...p) => p.flat().filter(Boolean).join(' ');
 /** Rows of 对局记录 shown at first and added by each 显示更多. */
 export const HISTORY_PAGE = 50;
 
-const statsStore = createStore({ open: false, tab: 'overview' });
+const statsStore = createStore({ open: false, tab: 'overview', minGames: 1 });
 
 /** Open the stats viewer (title screen / lobby / room entry points). */
 export function openStats() {
@@ -50,10 +50,19 @@ export const closeStats = () => statsStore.set({ open: false });
 
 const TABS = [
   { id: 'overview', name: N_('总览'), micro: 'OVERVIEW' },
+  { id: 'ranks', name: N_('排行'), micro: 'RANKINGS' },
   { id: 'bands', name: N_('策略'), micro: 'STRATEGIES' },
   { id: 'totals', name: N_('战斗累计'), micro: 'COMBAT TOTALS' },
   { id: 'history', name: N_('对局记录'), micro: 'HISTORY' },
 ];
+
+/** 排行页要查名字/图标的游戏数据。总览只需要 config / bands / assets（见文件头注释），
+ *  这几份（chess 1.8 MB 未压缩）等到切到「排行」再下载，别让只想看总览的人白等。 */
+const RANK_FILES = ['stages', 'bosses', 'bonds', 'chess'];
+
+/** 分组胜率「最少局数」的可选门槛。默认 1（不过滤）：一张只打过 1 局的图霸榜是误导，
+ *  但把它藏起来同样误导 —— 所以默认全列、显示局数，让用户自己决定要不要过滤。 */
+const MIN_GAMES_CHOICES = [1, 3, 5, 10];
 
 const pct = (n, d) => (d > 0 ? `${Math.round((n / d) * 100)}%` : '—');
 const dateTime = (ms) => {
@@ -127,6 +136,7 @@ function Overview({ agg, gd }) {
       <${StatCard} micro="WIN RATE" value=${pct(agg.wins, agg.count)} label=${t('胜率')} tone="gold" />
       <${StatCard} micro="HIDDEN CORE" value=${fmtNum(agg.hidden.reached)} label=${t('到达隐秘核心')} />
       <${StatCard} micro="HIDDEN CLEAR" value=${fmtNum(agg.hidden.cleared)} label=${t('通关隐秘核心')} />
+      <${StatCard} micro="HIDDEN RATE" value=${pct(agg.hidden.cleared, agg.count)} label=${t('隐藏阶段胜率')} />
       <${StatCard} micro="BEST ROUND" value=${fmtNum(agg.rounds.max)} label=${t('最远回合')} />
       <${StatCard} micro="TIME PLAYED" value=${playedText(agg.duration.totalMs)} label=${t('累计时长')} />
     </div>
@@ -237,6 +247,150 @@ function History({ records, gd, onOpen }) {
   <//>`;
 }
 
+// ---- 排行 (rankings: grouped win rates, favorites, bond records, averages) ------------------------------------------
+
+/** 分组胜率的小样本门槛选择器。默认「1」（不过滤）——见 MIN_GAMES_CHOICES 的注释。 */
+function MinGamesPicker({ value, onChange }) {
+  return html`<div class="st-mini" role="group" aria-label=${t('最少局数')}>
+    <span class="st-mini__label">${t('最少局数')}</span>
+    ${MIN_GAMES_CHOICES.map((n) => html`<button key=${n} type="button"
+      class=${cx('st-mini__btn', n === value && 'is-on')}
+      aria-pressed=${n === value ? 'true' : 'false'}
+      onClick=${() => onChange(n)}>${fmtNum(n)}</button>`)}
+  </div>`;
+}
+
+/** 一组按 id 分组的胜率表（局数 / 胜场 / 胜率 + 进度条）。 */
+function RateTable({ rows, nameOf }) {
+  return html`<div class="st-tablewrap"><table class="st-table">
+    <thead><tr><th>${t('名称')}</th><th class="num">${t('局数')}</th><th class="num">${t('胜场')}</th><th class="num">${t('胜率')}</th></tr></thead>
+    <tbody>
+      ${rows.map(([id, v]) => {
+        const rate = v.games > 0 ? Math.round((v.wins / v.games) * 100) : 0;
+        return html`<tr key=${id}>
+          <td><span class="st-band">${nameOf(id)}</span></td>
+          <td class="num">${fmtNum(v.games)}</td>
+          <td class="num">${fmtNum(v.wins)}</td>
+          <td class="num st-rate"><span class="st-bar" aria-hidden="true"><i style=${`width:${rate}%`}></i></span><b>${pct(v.wins, v.games)}</b></td>
+        </tr>`;
+      })}
+    </tbody>
+  </table></div>`;
+}
+
+/**
+ * 分组胜率：地图 / 首领 / 隐秘核心首领 / 羁绊各一张表。
+ *
+ * 局数低于门槛的组**不隐藏**，只是沉到后面（rankByRate 管排序）—— 藏起来会让人以为数据丢了，
+ * 而只显示它又会用「1 局 100%」误导人；两者都列出来，让用户自己看局数。
+ */
+function GroupedRates({ agg, gd, minGames, onMinGames }) {
+  const groups = [
+    { key: 'stages', label: t('地图'), name: (id) => gd.stage(id)?.name || id, rows: rankByRate(agg.stages, { minGames }) },
+    { key: 'bosses', label: t('首领'), name: (id) => gd.boss(id)?.name || id, rows: rankByRate(agg.bosses, { minGames }) },
+    // 隐秘核心的首领单独一张表：只有到达第 15 回合的对局才有 hiddenBossId，并进主表会搅乱主表的分母
+    { key: 'hidden', label: t('隐秘核心'), name: (id) => gd.boss(id)?.name || id, rows: rankByRate(agg.hiddenBosses, { minGames }) },
+    { key: 'bonds', label: t('羁绊'), name: (id) => gd.bond(id)?.name || id, rows: rankByRate(agg.bonds, { minGames }) },
+  ].filter((g) => g.rows.length);
+  if (!groups.length) return null;
+  return html`<${Section} title=${t('分组胜率')} micro="WIN RATE BY GROUP">
+    <${MinGamesPicker} value=${minGames} onChange=${onMinGames} />
+    ${groups.map((g) => html`<div key=${g.key} class="st-rank">
+      <h4 class="st-sub">${g.label}</h4>
+      <${RateTable} rows=${g.rows} nameOf=${g.name} />
+    </div>`)}
+  <//>`;
+}
+
+/** 惯用干员 / 惯用羁绊 Top 5。 */
+function Favorites({ agg, gd }) {
+  const chars = takeTop(
+    rankEntries(Object.entries(agg.chars), (v) => v.count, (v) => v.games),
+    (v) => v.count,
+    RANK_TOP_N,
+  );
+  // 「惯用羁绊」按激活局数排（没激活过的不算「用过」）
+  const bondEntries = Object.entries(agg.bonds).filter(([, v]) => v.games > 0);
+  const bonds = takeTop(
+    rankEntries(bondEntries, (v) => v.games, (v) => v.sumLayers),
+    (v) => v.games,
+    RANK_TOP_N,
+  );
+  const avgLayers = (v) => (v.games > 0 ? (v.sumLayers / v.games) : null);
+  const empty = !chars.length && !bonds.length;
+  return html`<${Section} title=${t('惯用阵容')} micro="FAVORITES">
+    ${empty ? html`<p class="st-empty">${t('更早的对局没有保留阵容数据 —— 打一局新的就会开始积累。')}</p>` : null}
+    ${chars.length ? html`<h4 class="st-sub">${t('干员')} <em class="st-sub__hint">${t('按出现次数')}</em></h4>
+      <div class="st-favs">
+        ${chars.map(([id, v]) => html`<div key=${id} class="st-fav">
+          <${UnitThumb} kind="chess" id=${id} size="sm" />
+          <div class="st-fav__text">
+            <span class="st-fav__name">${gd.chess(id)?.name || id}</span>
+            <span class="st-fav__num"><b class="num">${fmtNum(v.count)}</b> ${t('次')} · <b class="num">${fmtNum(v.games)}</b> ${t('局')}</span>
+          </div>
+        </div>`)}
+      </div>` : null}
+    ${bonds.length ? html`<h4 class="st-sub">${t('羁绊')} <em class="st-sub__hint">${t('按激活局数')}</em></h4>
+      <div class="st-favs">
+        ${bonds.map(([id, v]) => html`<div key=${id} class="st-fav">
+          <${BondGlyph} bondId=${id} size="sm" />
+          <div class="st-fav__text">
+            <span class="st-fav__name">${gd.bond(id)?.name || id}</span>
+            <span class="st-fav__num"><b class="num">${fmtNum(v.games)}</b> ${t('局')} · ${t('平均')} <b class="num">${avgLayers(v).toFixed(1)}</b> ${t('层')}</span>
+          </div>
+        </div>`)}
+      </div>` : null}
+  <//>`;
+}
+
+/** 羁绊最高层数榜。 */
+function BondRecords({ agg, gd }) {
+  const rows = Object.entries(agg.bonds)
+    .filter(([, v]) => v.maxLayers > 0)
+    .sort((a, b) => (b[1].maxLayers - a[1].maxLayers) || ((b[1].maxLayersAt || 0) - (a[1].maxLayersAt || 0)) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  if (!rows.length) return null;
+  return html`<${Section} title=${t('羁绊最高层数')} micro="BOND RECORDS">
+    <div class="st-tablewrap"><table class="st-table">
+      <thead><tr><th>${t('名称')}</th><th class="num">${t('最高层数')}</th><th class="num">${t('达成时间')}</th></tr></thead>
+      <tbody>
+        ${rows.map(([id, v]) => html`<tr key=${id}>
+          <td><span class="st-band"><${BondGlyph} bondId=${id} size="xs" />${gd.bond(id)?.name || id}</span></td>
+          <td class="num"><b>${fmtNum(v.maxLayers)}</b></td>
+          <td class="num st-dim">${dateTime(v.maxLayersAt)}</td>
+        </tr>`)}
+      </tbody>
+    </table></div>
+    <p class="st-hint">${t('层数是对局结算时的快照，不是过程峰值。')}</p>
+  <//>`;
+}
+
+/** 战斗均值：局平均伤害与局平均领袖伤害。 */
+function Averages({ agg }) {
+  const dmg = agg.averages.dmgDealt;
+  const boss = agg.averages.bossDamageLate;
+  const avg = (a) => (a.n > 0 ? fmtNum(Math.round(a.sum / a.n)) : '—');
+  return html`<${Section} title=${t('战斗均值')} micro="AVERAGES">
+    <div class="st-cards">
+      <${StatCard} micro="AVG DAMAGE" value=${avg(dmg)} label=${t('局平均伤害')} />
+      <${StatCard} micro="AVG BOSS DAMAGE" value=${avg(boss)} label=${t('局平均领袖伤害')} tone="gold" />
+    </div>
+    <p class="st-hint">${t('领袖伤害只统计打到 {n} 回合及以后的对局（更早结束的局基本没有领袖伤害，混进来只会把均值拉平）。', { n: LATE_GAME_ROUND })} ${t('样本：伤害 {a} 局、领袖伤害 {b} 局。', { a: fmtNum(dmg.n), b: fmtNum(boss.n) })}</p>
+  <//>`;
+}
+
+/** 排行页：四个分区。`ready` 是查名字/图标要的游戏数据。 */
+function Rankings({ agg, gd, ready, minGames, onMinGames }) {
+  if (!ready) return html`<div class="st-loading"><${Spinner} size="md" /></div>`;
+  if (!agg.count) return html`<p class="st-empty">${t('还没有记录 —— 完成一局对局后，这里会开始积累。')}</p>`;
+  return html`
+    <${GroupedRates} agg=${agg} gd=${gd} minGames=${minGames} onMinGames=${onMinGames} />
+    <${Favorites} agg=${agg} gd=${gd} />
+    <${BondRecords} agg=${agg} gd=${gd} />
+    <${Averages} agg=${agg} />
+    <p class="st-rule"><${Icon} name="info" />${t('阵容类统计（惯用干员、惯用羁绊、羁绊胜率与最高层数）覆盖 {n} 条记录 —— 更早的版本在压缩旧记录时会丢掉阵容，那些记录只能从排行榜里排除。', { n: agg.coverage.lineup })}</p>
+  `;
+}
+
 /** A stored match re-viewed as its settlement screen: the full game data is loaded now (the lobby alone never loads it). */
 function Replay({ rec, onBack }) {
   const gd = useGameData();
@@ -246,8 +400,9 @@ function Replay({ rec, onBack }) {
 }
 
 /** The overlay, rendered while open (its data hooks run only then). */
-function StatsScreen({ tab }) {
+function StatsScreen({ tab, minGames }) {
   const ready = useData('config', 'bands', 'assets');
+  const rankReady = useData(...RANK_FILES);
   const gd = useMemo(() => makeLookups(ready), [ready, data.locale()]);
   const [stats, setStats] = useState(() => loadStats());
   const [replay, setReplay] = useState(null);
@@ -257,6 +412,12 @@ function StatsScreen({ tab }) {
   replayRef.current = replay;
   const inMatch = useStore((s) => selectRoute(s) === 'game');
   useDocClass('sp-stats-open');
+
+  // 排行页要查名字/图标的那几份数据（chess 1.8 MB）等切到该页再下 —— 只想看总览的人不必为它付款。
+  useEffect(() => {
+    if (tab !== 'ranks') return;
+    for (const f of RANK_FILES) data.load(f);
+  }, [tab]);
 
   // a match starting (the host pressed 开始) takes the player to its briefing: the overlay must not sit on top of it
   useEffect(() => { if (inMatch) closeStats(); }, [inMatch]);
@@ -343,18 +504,19 @@ function StatsScreen({ tab }) {
       ${!ready ? html`<div class="st-loading"><${Spinner} size="md" /></div>`
         : stats.newer ? html`<p class="st-empty">${t('检测到更新版本的统计数据，请先升级客户端再查看，以免覆盖数据。')}</p>`
           : empty ? html`<p class="st-empty">${t('还没有记录 —— 完成一局对局后，这里会开始积累。')}</p>`
-            : tab === 'bands' ? html`<${Bands} agg=${agg} gd=${gd} />`
-              : tab === 'totals' ? html`<${CombatSums} agg=${agg} />`
-                : tab === 'history' ? html`<${History} records=${stats.records} gd=${gd} onOpen=${setReplay} />`
-                  : html`<${Overview} agg=${agg} gd=${gd} />`}
+            : tab === 'ranks' ? html`<${Rankings} agg=${agg} gd=${gd} ready=${rankReady} minGames=${minGames} onMinGames=${(n) => statsStore.set({ minGames: n })} />`
+              : tab === 'bands' ? html`<${Bands} agg=${agg} gd=${gd} />`
+                : tab === 'totals' ? html`<${CombatSums} agg=${agg} />`
+                  : tab === 'history' ? html`<${History} records=${stats.records} gd=${gd} onOpen=${setReplay} />`
+                    : html`<${Overview} agg=${agg} gd=${gd} />`}
     </main>
   </div>`;
 }
 
 /** Global stats viewer host — mounted once by main.js; renders nothing (and loads nothing) until opened. */
 export function StatsHost() {
-  const { open, tab } = useStore((s) => s, Object.is, statsStore);
+  const { open, tab, minGames } = useStore((s) => s, Object.is, statsStore);
   if (!open) return null;
-  return html`<${StatsScreen} tab=${tab} />`;
+  return html`<${StatsScreen} tab=${tab} minGames=${minGames} />`;
 }
 
