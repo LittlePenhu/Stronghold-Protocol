@@ -1242,5 +1242,6 @@
   "阵容类统计（惯用干员、惯用羁绊、羁绊胜率与最高层数）覆盖 {n} 条记录 —— 更早的版本在压缩旧记录时会丢掉阵容，那些记录只能从排行榜里排除。": "Lineup-based stats (favorite operators, favorite bonds, bond win rate and best layers) cover {n} matches — older versions dropped the lineup when compacting records, so those are left out of the rankings.",
   "隐藏阶段胜率": "Hidden-core win rate",
   "领袖伤害只统计打到 {n} 回合及以后的对局（更早结束的局基本没有领袖伤害，混进来只会把均值拉平）。": "Boss damage counts only matches that reached round {n} or later (earlier matches have almost none, and would just flatten the average).",
-  "首领": "Boss"
+  "首领": "Boss",
+  "不叠层的盟约不计入本表。": "Bonds that never stack are not counted here."
 }
