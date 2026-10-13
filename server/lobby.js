@@ -249,14 +249,21 @@ export class Lobby {
    *   now?: () => number,
    *   seedFn?: () => number,
    *   options?: Partial<typeof LOBBY_DEFAULTS>,
+   *   leaderboard?: import('./leaderboard.js').Leaderboard | null,
    * }} opts
    */
-  constructor({ registry, log = noopLog, MatchClass = DefaultMatch, getData = defaultGetData, now = Date.now, seedFn, options = {} }) {
+  constructor({ registry, log = noopLog, MatchClass = DefaultMatch, getData = defaultGetData, now = Date.now, seedFn, options = {}, leaderboard = null }) {
     this.registry = registry;
     this.log = log;
     this.MatchClass = MatchClass;
     this.getData = getData;
     this.now = now;
+    /**
+     * @type {import('./leaderboard.js').Leaderboard | null}
+     * 全服排行榜（`null` = 不启用，行为与加它之前一致）。**唯一的写入点是 onMatchEnd** ——
+     * 服务端自己结算完就记一笔，客户端报什么都不参与（见 server/leaderboard.js 顶部那段）。
+     */
+    this.leaderboard = leaderboard;
     this.seedFn = seedFn || (() => randomInt(2 ** 32));
     this.opts = { ...LOBBY_DEFAULTS, ...options };
     /** @type {Map<string, Room>} */
@@ -727,7 +734,9 @@ export class Lobby {
       diy: s.isBot ? null : s.diy || null,
     }));
     // lastPublic / results: the latest m.public broadcast and the m.result frames (encoded), kept for the replay.
-    const ctx = { live: true, ended: false, disposed: false, match: null, lastPublic: null, sharedResult: null, results: new Map() };
+    // `id` 是这一局对排行榜的幂等键（leaderboard.record 的 matchId）—— 随机而非递增，
+    // 免得房间重建 / 服务重启后撞上同一个号（撞了会把这局当成"已经记过"而跳过）。
+    const ctx = { id: randomBytes(8).toString('hex'), live: true, ended: false, disposed: false, match: null, lastPublic: null, sharedResult: null, results: new Map() };
     let seed = 0;
     try { seed = this.seedFn() >>> 0; } catch { seed = randomInt(2 ** 32); }
     try {
@@ -779,6 +788,7 @@ export class Lobby {
     room.matchCtx = null;
     room.matchKey = null;
     room.replay = this.buildReplay(room, ctx);
+    this.recordLeaderboard(room, ctx, summary);
     setImmediate(() => this.disposeMatchCtx(ctx));
     this.log.info(`[lobby] ${room.code} match #${room.matchCount} ended`);
     for (let i = 0; i < room.seats.length; i++) {
@@ -793,6 +803,33 @@ export class Lobby {
     if (!host || host.isBot || host.left) this.migrateHost(room);
     if (room.activeHumans().length === 0) this.disposeRoom(room, 'empty');
     else this.broadcastState(room);
+  }
+
+  /**
+   * 把这一局的结算记进全服排行榜 —— **全服榜单唯一的写入点**。
+   *
+   * 归属来自 **session**：`accountOf(playerId)` 读的是 `registry.byId(playerId).accountId`，
+   * 而不是 summary 里的任何字段。这是"成绩记在谁头上"唯一可信的来源：
+   * 客户端伪造不了「这局是我的」，也不可能把成绩塞给别人（它连这个函数都碰不到）。
+   * 没有账号的座位（账号系统未启用、或玩家还没拿到账号）直接不入榜。
+   *
+   * 榜单写失败**不应该**把对局本身拖下水：这里吞掉异常只记日志，房间该回大厅还回大厅。
+   * @param {Room} room @param {any} ctx @param {any} summary
+   */
+  recordLeaderboard(room, ctx, summary) {
+    const lb = this.leaderboard;
+    if (!lb || !summary || !Array.isArray(summary.players) || summary.players.length === 0) return;
+    try {
+      const res = lb.record(summary, {
+        matchId: ctx.id,
+        accountOf: (playerId) => this.registry.byId(playerId)?.accountId || null,
+      });
+      if (!res.skipped && res.recorded > 0) {
+        this.log.info(`[lobby] ${room.code} 排行榜入账 ${res.recorded} 人（match ${ctx.id.slice(0, 8)}）`);
+      }
+    } catch (e) {
+      this.log.error('[lobby] leaderboard record failed', e);
+    }
   }
 
   /** Match unicast; m.result frames are also kept for the replay. */

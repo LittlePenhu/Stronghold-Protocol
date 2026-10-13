@@ -17,7 +17,7 @@ const MAX_URL_LENGTH = 4096;
 /**
  * The GET /healthz body.
  * @param {{ startedAt: number, network: import('../net.js').Network, registry: import('../net.js').SessionRegistry,
- *           lobby: import('../lobby.js').Lobby }} health
+ *           lobby: import('../lobby.js').Lobby, leaderboard?: import('../leaderboard.js').Leaderboard | null }} health
  */
 export function healthReport({ startedAt, network, registry, lobby }) {
   return {
@@ -27,6 +27,19 @@ export function healthReport({ startedAt, network, registry, lobby }) {
     build: buildTag(),
     sockets: network.connectionCount, sessions: registry.size, ...lobby.stats(),
   };
+}
+
+/**
+ * GET /leaderboard 的响应体 —— 全服排行榜（只读聚合）。
+ *
+ * 这是排行榜**唯一**的对外读接口：只返回聚合后的榜单，没有"按 id 查任意玩家明细"的入口，
+ * 所以拿到这个 URL 的人只能看到本来就公开的排名，看不到任何一局的原始记录。
+ * 服务端没启用账号系统（或没配榜单文件）时返回 `{ enabled: false }`，前端据此隐藏入口。
+ * @param {{ leaderboard?: import('../leaderboard.js').Leaderboard | null }} health
+ */
+export function leaderboardReport({ leaderboard }) {
+  if (!leaderboard) return { enabled: false };
+  return { enabled: true, ...leaderboard.boards() };
 }
 
 /**
@@ -49,6 +62,11 @@ export function createRequestHandler({ serveStatic, health, log }) {
     }
     if (parts.rawPath === '/healthz') {
       sendJson(req, res, 200, healthReport(health));
+      return;
+    }
+    // 全服排行榜（只读）。没有缓存头 —— 榜单一变就该看到新的，而且它本来就很小。
+    if (parts.rawPath === '/leaderboard') {
+      sendJson(req, res, 200, leaderboardReport(health));
       return;
     }
     await serveStatic(req, res, parts.rawPath, parts.query);
