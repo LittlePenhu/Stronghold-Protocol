@@ -1273,5 +1273,7 @@
   "这个代号已经有人用了 —— 如果那是你，请用密码登录；否则换一个。": "That callsign is taken — if it is yours, please log in with your password; otherwise pick another.",
   "这个服务器没有启用账号系统，所以还没有全服排行榜。": "This server runs without accounts, so there are no server-wide rankings yet.",
   "通关 {n} 次": "cleared {n}",
-  "首领胜率": "Win rate by boss"
+  "首领胜率": "Win rate by boss",
+  "换一个代号": "Use a different callsign",
+  "这个代号没有设过密码 —— 输多少次都不对。请在当初注册的那个浏览器里打开（凭证只存在那里），或者换一个代号。": "This callsign has no password — no guess will work. Open it in the browser you first played from (that is where the credential lives), or pick a different callsign."
 }

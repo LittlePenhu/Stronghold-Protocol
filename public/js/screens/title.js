@@ -220,12 +220,30 @@ export function TitleScreen() {
   const acctError = conn.lastError?.code || null;
   const nameTaken = acctError === 'NAME_TAKEN';
   const badCredentials = acctError === 'BAD_CREDENTIALS';
+  // 「这个代号没设过密码」：继续显示密码框只会让人一遍遍试错 —— 密码不存在，
+  // 试多少次都是 BAD_CREDENTIALS。改成收起密码框 + 给一条出路（换代号 / 回原浏览器）。
+  const noPassword = acctError === 'NO_PASSWORD';
   // 服务端说「这个代号有人了」或「密码不对」⇒ 展开密码输入框（那是唯一的自救方式）
   const passwordMode = askPassword || nameTaken || badCredentials;
 
+  /** 从「这个代号没密码」的死角里退出来：清掉本地凭证，重新以新代号开始。 */
+  const resetAccount = () => {
+    identity.forgetAccount?.();
+    net.clearPassword?.();
+    setPassword('');
+    setAskPassword(false);
+    errAtStart.current = null;
+    // 走 net.clearError() 而不是直接赋值 lastError：直接赋值不 emit，
+    // 订阅 store 的组件不会重渲染，提示条会一直挂在屏幕上。
+    net.clearError?.();
+  };
+
   const start = () => {
     if (!valid) { toast(t('请输入博士代号'), 'warn'); return; }
-    if (passwordMode && !password) { toast(t('请输入密码'), 'warn'); return; }
+    // 没设过密码的账号不该再要密码 —— 直接当新代号放行（服务端会判名字被占而拒绝，
+    // 所以玩家必须真的换一个名字，而不会以为是自己密码输了）。
+    if (passwordMode && !noPassword && !password) { toast(t('请输入密码'), 'warn'); return; }
+    if (noPassword) return;                 // 按钮是「换一个代号」，不直接提交
     identity.saveName(name);
     // 记下点下去那一刻的错误，好把这一次握手的结果与上一次的残影区分开
     errAtStart.current = conn.lastError?.code || null;
@@ -306,18 +324,24 @@ export function TitleScreen() {
           <${Icon} name="key" />
           <span>${t('收到同盟邀请')}</span><b class="num">${pendingJoin}</b><span class="t-lo">${t('· 输入代号后将自动加入')}</span>
         </div>` : null}
-        ${nameTaken || badCredentials ? html`<div class="title-invite" role="alert">
+        ${nameTaken || badCredentials || noPassword ? html`<div class="title-invite" role="alert">
           <${Icon} name="info" />
-          <span>${nameTaken
-            ? t('这个代号已经有人用了 —— 如果那是你，用密码登录；否则换一个。')
-            : t('密码不正确')}</span>
+          <span>${noPassword
+            ? t('这个代号没有设过密码 —— 输多少次都不对。请在当初注册的那个浏览器里打开（凭证只存在那里），或者换一个代号。')
+            : nameTaken
+              ? t('这个代号已经有人用了 —— 如果那是你，用密码登录；否则换一个。')
+              : t('密码不正确')}</span>
         </div>` : null}
         <${TextField} label=${t('博士代号')} micro="CALLSIGN" size="lg" icon="user" value=${name} maxLength=${NAME_MAX_LEN}
           placeholder=${t('输入你的代号（最多 {NAME_MAX_LEN} 字）', { NAME_MAX_LEN })} autoFocus=${!touchUi}
           onInput=${setName} onEnter=${start} />
-        ${passwordMode ? html`<${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"
+        ${passwordMode && !noPassword ? html`<${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"
           value=${password} maxLength=${128} onInput=${setPassword} onEnter=${start} />` : null}
-        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" disabled=${!valid || pending} onClick=${start}>${passwordMode ? t('用密码登录') : t('开始')}<//>
+        ${noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${resetAccount}>
+          ${t('换一个代号')}</button>` : null}
+        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons"
+          disabled=${!valid || pending || (passwordMode && !noPassword && !password)} onClick=${start}>
+          ${noPassword ? t('开始') : passwordMode ? t('用密码登录') : t('开始')}<//>
         ${!passwordMode && valid ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAskPassword(true)}>
           ${t('换设备了？用密码登录')}</button>` : null}
         <div class="title-conn">

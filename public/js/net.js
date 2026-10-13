@@ -466,6 +466,24 @@ export class Net {
     this._sendHello();
   }
 
+  /**
+   * 丢掉当前这次握手要用的密码。
+   * 「这个代号没设过密码」时前端要退出密码模式 —— 不清的话下一次 hello 还会带上它，
+   * 换个代号进来也会莫名被判密码错误。
+   */
+  clearPassword() { this.accountPassword = null; }
+
+  /**
+   * 清掉当前这次握手留下的错误，让标题画面的提示条消失。
+   * 必须走 _setStatus（它会 emit 'status'）—— 直接给 this.lastError 赋值不会触发
+   * 订阅 store 的组件重渲染，提示条会一直挂在屏幕上。
+   */
+  clearError() {
+    if (!this.lastError) return;
+    this.lastError = null;
+    this._emit('status', this.snapshot());
+  }
+
   // ---- requests --------------------------------------------------------------------------------
 
   _nextRid() {
