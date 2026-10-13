@@ -5,6 +5,7 @@
 //   me          – { playerId, name, token } from `welcome`
 //   session     – { entered } (the player pressed 开始 on the title screen in this tab)
 //   room        – last `room.state` payload (without `t`) or null
+//   roomList    – 实时在线房间列表（S2C `lobby.rooms` / `welcome.rooms`），只在大厅画面显示
 //   match       – { public, private, field, result } from the `m.*` pushes; `battle` = the local battle runner's
 //                 state (client-side combat, public/js/battle/runner.js): { battleId, fieldId, kind, authoritative,
 //                 watch, done, own, members, loading, speed, paused, leaks } | null — `paused`: the solo pause holds
@@ -79,6 +80,7 @@ export const initialState = Object.freeze({
   me: { playerId: null, name: '', token: null },
   session: { entered: false },
   room: null,
+  roomList: [],
   match: emptyMatch(),
   ticker: [],
   emotes: [],

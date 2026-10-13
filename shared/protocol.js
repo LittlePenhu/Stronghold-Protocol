@@ -476,6 +476,9 @@ export const C2S = {
 export const S2C = [
   'welcome', 'ok', 'error', 'pong',
   'room.state', 'room.closed',
+  // lobby.rooms { rooms: [roomListEntry] } — 实时在线房间列表（server/lobby.js roomList）：每个房间一行紧凑数据，
+  // 房间一有变化就推给所有**不在房间里**的会话（成员看 room.state），`welcome.rooms` 带一份初始快照。
+  'lobby.rooms',
   'm.public', 'm.private', 'm.field', 'm.toast', 'm.ticker', 'm.emote', 'm.result',
   // m.layer { playerId, bondId, add } — own live prep layer gain; ephemeral, never replayed on resync.
   'm.layer',

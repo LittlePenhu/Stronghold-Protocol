@@ -293,6 +293,47 @@ export class Lobby {
     return { rooms: this.rooms.size, matches, humans, bots, spectators };
   }
 
+  /**
+   * 实时在线房间列表（S2C `lobby.rooms` / `welcome.rooms`）—— 每个房间一行，只含列表要展示的东西：
+   * 房间码、模式、难度、是否在对局、人数（人 / AI / 观战）与房主显示名。**没有玩家 id、没有座位明细** ——
+   * 这是「有哪些房间可以进」的目录，不是房间内部状态。
+   *
+   * 顺序确定（创建时间升序，同毫秒按房间码）：同一份数据永远给同一个列表，
+   * 测试和客户端 diff 都不受 Map 插入顺序之外的因素影响。
+   * @returns {{ code: string, mode: string, difficulty: string, inMatch: boolean, humans: number, bots: number,
+   *             spectators: number, host: string }[]}
+   */
+  roomList() {
+    const rooms = [...this.rooms.values()].filter((r) => !r.disposed);
+    rooms.sort((a, b) => a.createdAt - b.createdAt || (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+    return rooms.map((r) => {
+      let humans = 0;
+      let bots = 0;
+      for (const s of r.seats) if (s && !s.left) (s.isBot ? bots++ : humans++);
+      const hostSeat = r.hostId ? r.seatOf(r.hostId) : null;
+      return {
+        code: r.code, mode: r.mode, difficulty: r.difficulty, inMatch: !!r.match,
+        humans, bots, spectators: r.spectators.length,
+        host: hostSeat ? hostSeat.name : '',
+      };
+    });
+  }
+
+  /**
+   * Push `lobby.rooms` to every connected session **not** in a room (members are kept up to date by `room.state`
+   * and do not need the directory). Piggy-backed on `broadcastState` + `disposeRoom`, so every mutation that
+   * changes a row — create / join / leave / bots / kick / spectate / start / match end / room disposed — updates
+   * every bystander without hunting down each call site.
+   */
+  broadcastRooms() {
+    const data = encode({ t: 'lobby.rooms', rooms: this.roomList() });
+    if (data == null) return;
+    for (const session of this.registry.all()) {
+      if (!session.connected || session.roomCode) continue;
+      sendRaw(session.ws, data);
+    }
+  }
+
   // ---------------------------------------------------------------------------------------------------
   // net.js handler interface
   // ---------------------------------------------------------------------------------------------------
@@ -710,9 +751,9 @@ export class Lobby {
     return OK;
   }
 
-  /** Extra fields of every `welcome` (net.js): the operators a 自选 slot may field (shared/diy.js `kitted`). */
+  /** Extra fields of every `welcome` (net.js): the operators a 自选 slot may field (shared/diy.js `kitted`), and the live room list's snapshot (`rooms`). */
   welcomeInfo() {
-    return { diyKitted: KITTED_CHARS };
+    return { diyKitted: KITTED_CHARS, rooms: this.roomList() };
   }
 
   // ---------------------------------------------------------------------------------------------------
@@ -1136,6 +1177,8 @@ export class Lobby {
     }
     if (ctx) this.disposeMatchCtx(ctx);
     this.log.info(`[lobby] ${room.code} disposed (${reason})`);
+    // 刚被请出房间的成员也是旁观者了 —— 他们正好要拿到删掉这行之后的列表
+    this.broadcastRooms();
   }
 
   genCode() {
@@ -1164,6 +1207,8 @@ export class Lobby {
     if (room.disposed) return;
     const data = encode(room.toState());
     for (const session of this.memberSessions(room)) sendRaw(session.ws, data);
+    // 房间成员看 room.state；房间里的人看不到自己这行的变化，旁观者们要看（实时房间列表）
+    this.broadcastRooms();
   }
 
   sendState(room, session) {

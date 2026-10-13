@@ -239,10 +239,65 @@ function DifficultyCard({ roomMode, difficulty, selected, onSelect }) {
   </button>`;
 }
 
+/**
+ * 一行房间的可用操作（纯逻辑，test/ui/room-list.test.js 钉它）：只有同盟房间可进 —— 独立模拟没有别人的
+ * 座位；「加入」= 还没开打且有空博士席；「观战」= 观战席没满（对局中照常进观战席）。
+ * @param {{ mode: string, inMatch: boolean, humans: number, bots: number, spectators: number }} room
+ * @returns {{ canJoin: boolean, canSpectate: boolean }}
+ */
+export function roomRowActions(room) {
+  const coop = room.mode === 'coop';
+  const filled = (room.humans || 0) + (room.bots || 0);
+  return {
+    canJoin: coop && !room.inMatch && filled < MAX_SEATS,
+    canSpectate: coop && room.spectators < MAX_SPECTATORS,
+  };
+}
+
+/** 实时在线房间列表的一行（server/lobby.js roomList 的一行）：房间码 / 房主 / 模式 / 难度 / 人数 / 状态 / 操作。 */
+function RoomRow({ room, onJoin, onSpectate, busy, online }) {
+  const coop = room.mode === 'coop';
+  const filled = room.humans + room.bots;
+  const { canJoin, canSpectate } = roomRowActions(room);
+  const diffName = DIFFICULTY_NAMES[room.difficulty];
+  return html`<li class=${`room-row${room.inMatch ? ' is-playing' : ''}`}>
+    <span class="room-row__main">
+      <span class="room-row__code num">${room.code}</span>
+      <span class="room-row__host t-lo">${t('房主：{name}', { name: room.host || '—' })}</span>
+    </span>
+    <span class="room-row__meta">
+      <span class="room-row__mode">${coop ? t('同盟模拟') : t('独立模拟')}</span>
+      ${diffName ? html`<span class="room-row__diff" style=${`--d-color:${DIFFICULTY_COLORS[room.difficulty] || 'var(--amber)'}`}>${t(diffName)}</span>` : null}
+    </span>
+    <span class="room-row__nums">
+      <span class="num">${filled}/${MAX_SEATS}</span>
+      ${room.spectators ? html`<span class="room-row__spec num" title=${t('观战席')}><${Icon} name="eye" />${room.spectators}</span>` : null}
+    </span>
+    <span class=${`room-row__status${room.inMatch ? ' is-playing' : ''}`}>${room.inMatch ? t('对局中') : t('等待中')}</span>
+    <span class="room-row__actions">
+      ${canJoin ? html`<${Button} variant="amber" size="sm" icon="users" loading=${busy === 'join'} disabled=${!online} onClick=${() => onJoin(room.code)}>${t('加入')}<//>` : null}
+      ${canSpectate ? html`<${Button} variant="secondary" size="sm" icon="eye" loading=${busy === 'spectate'} disabled=${!online} onClick=${() => onSpectate(room.code)}>${t('观战')}<//>` : null}
+    </span>
+  </li>`;
+}
+
+/**
+ * 实时在线房间列表（store.roomList ← `welcome.rooms` / S2C `lobby.rooms`，服务端一有变化就推送）。
+ * 点「加入」= room.join、「观战」= room.spectate，与上面输密钥的两条路完全同一条协议。
+ */
+function RoomListPanel({ rooms, onJoin, onSpectate, busy, online }) {
+  return html`<ul class="room-list">
+    ${rooms.length
+      ? rooms.map((r) => html`<${RoomRow} key=${r.code} room=${r} onJoin=${onJoin} onSpectate=${onSpectate} busy=${busy} online=${online} />`)
+      : html`<li class="room-list__empty t-dim">${t('暂无在线房间')}</li>`}
+  </ul>`;
+}
+
 /** Lobby screen component. */
 export function LobbyScreen() {
   const me = useStore((s) => s.me, shallowEqual);
   const conn = useStore((s) => s.connection, shallowEqual);
+  const rooms = useStore((s) => s.roomList);
   useData('config');
   const [roomMode, setRoomMode] = useState(() => (loadPref('lobby.mode', 'coop') === 'solo' ? 'solo' : 'coop'));
   const [difficulty, setDifficulty] = useState(() => {
@@ -357,6 +412,10 @@ export function LobbyScreen() {
                 onClick=${() => setCode(c)}>${c}</button>`)}`
               : html`<span class="t-dim">${t('向同伴索取 {ROOM_CODE_LEN} 位同盟密钥，或直接打开邀请链接', { ROOM_CODE_LEN })}</span>`}
           </div>
+        <//>
+        <div class="section-label"><span class="section-label__idx num">04</span>${t('在线同盟')}<${MicroLabel}>LIVE ALLIANCES<//></div>
+        <${Panel} class="room-list-panel" tone="mint">
+          <${RoomListPanel} rooms=${rooms} onJoin=${join} onSpectate=${spectate} busy=${busy} online=${online} />
         <//>
         <${TipsPanel} />
       </section>

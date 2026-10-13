@@ -153,6 +153,8 @@ function onWelcome(msg) {
   const name = typeof msg.name === 'string' && msg.name ? msg.name : prev.me.name;
   identity.saveName(name);
   store.set({ me: { playerId: msg.playerId ?? null, name, token: typeof msg.token === 'string' ? msg.token : null } });
+  // 实时在线房间列表的初始快照（welcome.rooms；之后靠 lobby.rooms 推送更新）
+  if (Array.isArray(msg.rooms)) store.set({ roomList: msg.rooms });
   welcomeAt = Date.now();
 
   if (prevId != null && prevId !== msg.playerId) {
@@ -223,6 +225,8 @@ function wireNet() {
   net.on('replaced', () => toast(t('该身份已在其他页面登录，本页已断开'), 'warn', { ttl: 6000 }));
   net.on('unhandledError', (err) => toastError(err));
   net.on('room.state', onRoomState);
+  // 实时在线房间列表（server/lobby.js broadcastRooms）：每帧都是全量快照，直接覆盖
+  net.on('lobby.rooms', (msg) => store.set({ roomList: Array.isArray(msg.rooms) ? msg.rooms : [] }));
   net.on('room.closed', (msg) => {
     backToLobby();
     const known = Object.hasOwn(CLOSE_REASON, String(msg.reason)) ? CLOSE_REASON[msg.reason] : null;
