@@ -118,6 +118,7 @@ export const ERR = Object.freeze({
   BAD_PASSWORD: 'BAD_PASSWORD',
   NO_ACCOUNT: 'NO_ACCOUNT',
   BAD_CREDENTIALS: 'BAD_CREDENTIALS',
+  NO_PASSWORD: 'NO_PASSWORD',
   STORE: 'STORE',
 });
 
@@ -399,6 +400,11 @@ export class Accounts {
     if (owner) {
       // 名字被占了。密码是唯一的入口 —— 密码错和"没设密码"对外都是 BAD_CREDENTIALS。
       if (password == null) throw new AccountError(ERR.NAME_TAKEN);
+      // 用户名已确认属于某人（有名字 + 密码这个组合本身就是一次校验），所以告诉他
+      // 「这个账号没设密码」不算泄漏 —— 他若连名字都填错，这里根本不会走到。
+      // 不给这个提示，前端只能一遍遍显示「密码不正确」，没设过密码的用户会卡死在死循环里
+      // （他无从得知自己永远等不到那个正确的密码）。
+      if (!owner.password) throw new AccountError(ERR.NO_PASSWORD);
       const rec = this.loginWithPassword(clean, password); // 失败会抛 BAD_CREDENTIALS
       const { token: fresh } = this.issueToken(rec.id);
       return { account: rec, token: fresh, created: false };

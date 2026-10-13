@@ -153,6 +153,9 @@ export const ERR = Object.freeze({
   BAD_NAME: 'BAD_NAME',
   BAD_CREDENTIALS: 'BAD_CREDENTIALS',
   BAD_PASSWORD: 'BAD_PASSWORD',
+  // 「名字对的、密码也给了，但这个账号压根没设过密码」—— 单独一个码，否则前端只能显示
+  // 「密码不正确」，没设过密码的人会一遍遍试错、永远进不去（详见 accounts.js 的 authenticate）。
+  NO_PASSWORD: 'NO_PASSWORD',
   INTERNAL: 'INTERNAL',
 });
 
@@ -168,6 +171,7 @@ export const ERR_TEXT = {
   BAD_NAME: N_('代号不合法：1–12 个字符，首尾不能有空格，不能含不可见字符。'),
   BAD_CREDENTIALS: N_('密码不正确'),
   BAD_PASSWORD: N_('密码至少 6 位'),
+  NO_PASSWORD: N_('这个代号没有设过密码 —— 输多少次都不对。请在当初注册的那个浏览器里打开（凭证只存在那里），或者换一个代号。'),
 };
 
 // ---- Emotes (交流, research 09 §4) -----------------------------------------------------------------------------

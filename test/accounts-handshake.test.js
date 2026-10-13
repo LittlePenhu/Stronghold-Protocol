@@ -163,20 +163,32 @@ describe('账号握手：名字被占用（防串号的主战场）', () => {
     assert.equal(accounts.size, 1);
   });
 
-  test('名字被占用 + 密码错 ⇒ BAD_CREDENTIALS（与"没设密码"不可区分）', (t) => {
+  test('★ 没设密码的账号在握手层返回 NO_PASSWORD（不是「密码不正确」）', (t) => {
+    // 这条测试原先断言握手层把「密码错」与「没设密码」都映射成 BAD_CREDENTIALS，
+    // 理由是「不泄漏账号是否存在」。2026-10-13 改成 NO_PASSWORD —— 前端需要区分这两种情况，
+    // 否则没设密码的玩家会卡在「密码不正确」的死循环里（那个密码根本不存在）。
+    // 要守住的底线仍然是：**拒绝时不签发任何 session、不给出任何凭证**。
     const { hello } = stack(t);
     const a = fakeConn();
-    hello(a, { rid: 1, name: '甲', accountPassword: 'pw123456' });
+    hello(a, { rid: 1, name: '甲', accountPassword: 'pw123456' });   // 设了密码
     const b = fakeConn();
-    hello(b, { rid: 2, name: '乙' });   // 没设密码
+    hello(b, { rid: 2, name: '乙' });                              // 没设密码
 
-    for (const [name, pw] of [['甲', 'wrong'], ['乙', 'pw123456']]) {
-      const c = fakeConn();
-      hello(c, { rid: 3, name, accountPassword: pw });
-      assert.equal(c.last().code, ERR.BAD_CREDENTIALS, `${name}/${pw}`);
-      assert.equal(c.last().detail, 'BAD_CREDENTIALS');
-      assert.equal(c.conn.session, null);
-    }
+    // 设了密码 + 错密码 → BAD_CREDENTIALS（提示不变）
+    const c = fakeConn();
+    hello(c, { rid: 3, name: '甲', accountPassword: 'wrong' });
+    assert.equal(c.last().code, ERR.BAD_CREDENTIALS);
+    assert.equal(c.last().detail, 'BAD_CREDENTIALS');
+    assert.equal(c.conn.session, null, '拒绝时不建 session');
+
+    // 没设密码 + 任意密码 → NO_PASSWORD
+    const d = fakeConn();
+    hello(d, { rid: 4, name: '乙', accountPassword: 'pw123456' });
+    assert.equal(d.last().code, ERR.NO_PASSWORD);
+    assert.equal(d.last().detail, 'NO_PASSWORD');
+    assert.equal(d.conn.session, null, '同样不建 session');
+    assert.equal(d.last().accountId, undefined, '也不回 accountId');
+    assert.equal(d.last().accountToken, undefined, '更不发凭证');
   });
 
   test('密码太短在注册路径上被拒', (t) => {

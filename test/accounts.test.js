@@ -278,12 +278,31 @@ describe('accounts: authenticate —— 统一认证入口（防串号的最后�
     assert.equal(a.byCredential(second.token).id, first.account.id);
   });
 
-  test('名字被占用 + 密码错 ⇒ BAD_CREDENTIALS（与"没设密码"不可区分）', () => {
+test('★ NO_PASSWORD 不扩大既有的信息暴露面', () => {
+    // 这条测试原先断言「密码错」与「没设密码」返回同一个码。那在 2026-10-13 被推翻了：
+    // 没设密码的用户会卡在死循环里（前端一遍遍显示「密码不正确」，而正确的密码不存在）。
+    // 现在没设密码返回 NO_PASSWORD。下面钉住「为什么这没有让门槛变低」——
+    // 注意**账号存在性本来就能被区分**，这是「打开就玩」这个设计固有的：
+    // 一个没人用的名字 + 合法长度的密码 = 注册成功（进得去）；
+    // 一个已被占用的名字 + 密码 = 拒绝。所以 NO_PASSWORD 不是新增的泄漏面，
+    // 它只是把「存在、且没设密码」这一种**原本就会被拒绝**的情况说得更准确。
     const a = fresh();
     a.register('甲', 'pw123456');
-    a.register('乙');   // 这个没设密码
-    assert.throws(() => a.authenticate({ name: '甲', password: 'wrong' }), (e) => e.code === ERR.BAD_CREDENTIALS);
-    assert.throws(() => a.authenticate({ name: '乙', password: 'x' }), (e) => e.code === ERR.BAD_CREDENTIALS);
+    a.register('乙');   // 存在、没设密码
+
+    // 1) 设了密码 + 错密码 → BAD_CREDENTIALS
+    assert.throws(() => a.authenticate({ name: '甲', password: 'wrong1' }), (e) => e.code === ERR.BAD_CREDENTIALS);
+
+    // 2) 没设密码 + 任意密码 → NO_PASSWORD（修复本身）
+    assert.throws(() => a.authenticate({ name: '乙', password: 'whatever1' }), (e) => e.code === ERR.NO_PASSWORD);
+
+    // 3) 三条路径都不给出**任何凭证**
+    assert.equal(a.byCredential('whatever1'), null);
+    assert.equal(a.list().length, 2, '甲乙都没被动过');
+
+    // 4) ★ 真正的防线：不管错误码是什么，光知道名字都进不去别人的账号。
+    //    （唯一能进自己账号的路径是持有服务端签发的凭证，或知道自己的密码。）
+    assert.equal(a.list().find((x) => x.name === '乙').tokens.length, 1, '乙的凭证没被多发');
   });
 
   test('★ 两条不同凭证同时在线，互不串号', () => {
@@ -389,5 +408,41 @@ describe('accounts: 持久化与崩溃安全', () => {
     const raw = fs.readFileSync(file, 'utf8');
     assert.ok(raw.includes('\n  "accounts"'), '应是缩进过的 JSON');
     assert.ok(raw.endsWith('\n'), '末尾应有换行');
+  });
+});
+
+describe('accounts: 没设密码的账号不会卡死在「密码不正确」', () => {
+  // 这组用例钉的是一个真发生过的死循环（2026-10-13）：账号没设密码、浏览器凭证又丢了，
+  // 前端只会显示「密码不正确」，玩家一遍遍试错却永远等不到那个根本不存在的密码。
+  const code = (f) => { try { f(); return null; } catch (e) { return e.code; } };
+
+  test('没设密码的账号 + 任意密码 → NO_PASSWORD（而不是 BAD_CREDENTIALS）', () => {
+    const a = fresh();
+    a.register('喷壶');
+    assert.equal(code(() => a.authenticate({ name: '喷壶', password: '瞎打的' })), ERR.NO_PASSWORD);
+  });
+
+  test('设了密码的账号 + 错密码 → 仍是 BAD_CREDENTIALS（提示不变）', () => {
+    const a = fresh();
+    a.register('甲', 'pw123456');
+    assert.equal(code(() => a.authenticate({ name: '甲', password: 'wrong' })), ERR.BAD_CREDENTIALS);
+  });
+
+  test('★ NO_PASSWORD 不泄漏凭证，也不多发一张（真正的防线是「拿不到凭证」）', () => {
+    const a = fresh();
+    a.register('喷壶');
+    assert.throws(() => a.authenticate({ name: '喷壶', password: 'whatever1' }), (e) => e.code === ERR.NO_PASSWORD);
+    assert.equal(a.size, 1, '账号数没变');
+    assert.equal(a.list()[0].tokens.length, 1, '也没有多发一张凭证');
+    assert.equal(a.byCredential('whatever1'), null);
+  });
+
+  test('设了密码就能换设备回来（这个死循环有出口）', () => {
+    const a = fresh();
+    a.register('甲', 'pw123456');
+    const r = a.authenticate({ name: '甲', password: 'pw123456' });
+    assert.equal(r.account.name, '甲');
+    assert.ok(r.token, '换设备登录会拿到一张新凭证');
+    assert.equal(a.byCredential(r.token).name, '甲');
   });
 });
