@@ -124,6 +124,20 @@ export class Net {
     this.WS = opts.WebSocket || null;
     this.getToken = typeof opts.getToken === 'function' ? opts.getToken : () => null;
     this.getTokenClaim = typeof opts.getTokenClaim === 'function' ? opts.getTokenClaim : () => null;
+    /**
+     * 本设备存下来的账号凭证（由 identity 提供，正常情况是 localStorage 里那条）。
+     * 返回 null / 空串都可以 —— 服务端会退回「按名字注册」那条路。
+     */
+    this.getAccountToken = typeof opts.getAccountToken === 'function' ? opts.getAccountToken : () => null;
+    /**
+     * @type {string | null} 一次性密码：**只活在内存里、只发一次**。
+     * 用在「换设备 / 清了浏览器数据，但不想丢掉账号」那条路上 —— 玩家输入密码后用 usePassword() 设上，
+     * 下一次 hello 带上；无论成功（welcome）还是失败（helloError）都会立刻清掉，
+     * 免得之后每次自动重连都把密码又发一遍。
+     */
+    this.accountPassword = null;
+    /** 服务端签发了新设备凭证时的回调 —— 必须存下来，否则下次就得靠密码或换个名字重来。 */
+    this.onAccountToken = typeof opts.onAccountToken === 'function' ? opts.onAccountToken : null;
     this.now = opts.now || (() => Date.now());
     this.random = opts.random || Math.random;
     this.timers = opts.timers || {
@@ -140,6 +154,8 @@ export class Net {
     this.helloName = null;     // name we sent in the hello that got the last welcome
     this.serverName = null;    // name as normalised by the server
     this.playerId = null;
+    /** @type {string | null} 服务端裁定的账号 id（全服排行榜的归属）；服务端不启用账号系统时恒为 null */
+    this.accountId = null;
     this.attempt = 0;          // consecutive failed connection attempts
     this.retryAt = 0;          // epoch ms of the next reconnect attempt (0 = none)
     this.ping = null;          // last RTT in ms
@@ -375,6 +391,16 @@ export class Net {
       if (claim?.noReplace) msg.noReplace = true;
       if (Number.isFinite(claim?.claimAt)) msg.claimAt = claim.claimAt;
     }
+    // 账号凭据：设备凭证（长期，identity 存的）+ 一次性密码（换设备 / 清了浏览器数据之后用）。
+    // **客户端从不自报 accountId** —— 身份一律由服务端从这两样东西裁定（server/accounts.js authenticate）。
+    let acctToken;
+    try { acctToken = this.getAccountToken(); } catch { acctToken = null; }
+    if (typeof acctToken === 'string' && acctToken.length > 0 && acctToken.length <= 64) {
+      msg.accountToken = acctToken;
+    }
+    if (typeof this.accountPassword === 'string' && this.accountPassword.length > 0 && this.accountPassword.length <= 128) {
+      msg.accountPassword = this.accountPassword;
+    }
     this._helloToken = token;
     this._helloRid = rid;
     this._helloSentName = this.name;
@@ -400,6 +426,13 @@ export class Net {
     this.helloName = this._helloSentName;
     this.serverName = typeof msg.name === 'string' && msg.name ? msg.name : this._helloSentName;
     this.playerId = msg.playerId ?? null;
+    // 账号：accountId 是服务端裁定的归属（全服排行榜按它记账）；服务端没启用账号系统时就是 null。
+    this.accountId = typeof msg.accountId === 'string' && msg.accountId ? msg.accountId : null;
+    if (typeof msg.accountToken === 'string' && msg.accountToken) {
+      try { this.onAccountToken?.(msg.accountToken, msg); } catch (e) { console.error('[net] onAccountToken failed', e); }
+    }
+    if (msg.accountNew) this._emit('accountNew', { accountId: this.accountId, name: this.serverName });
+    this.accountPassword = null;   // 一次性：无论走哪条路，握手成功后就不再带密码
     this.attempt = 0;
     this.lastError = null;
     if (Number.isFinite(msg.serverNow)) this._addClockSample(msg.serverNow + (this.ping ?? 0) / 2 - this.now(), Infinity);
@@ -411,11 +444,26 @@ export class Net {
   _onHelloError(msg) {
     this._clearTimer('_helloTimer', 'clearTimeout');
     this._helloRid = null;
+    // 密码错了 / 名字被占：把一次性密码清掉，否则之后每次自动重连都会把同一个错密码再发一遍。
+    // 提示与重试交给界面（它会重新问一次密码）。
+    this.accountPassword = null;
     this.lastError = new NetError(msg.code, msg.msg, msg.detail);
     this._setStatus('connected');
     // Queued requests can't be sent without a session.
     this._failPending('OFFLINE', true);
     this._emit('helloError', this.lastError);
+  }
+
+  /**
+   * 用「用户名 + 密码」登录：设上一次性密码并立刻重发 hello（成功或失败后密码都会自动清掉）。
+   * 用在「换设备」或「浏览器数据被清了但不想丢掉账号」的时候 —— 账号名就是当前 setName 的那个名字。
+   * @param {string} password
+   */
+  usePassword(password) {
+    this.accountPassword = typeof password === 'string' && password ? password : null;
+    if (!this.name || !this.ws || this.ws.readyState !== WS_OPEN) return;
+    this.helloName = null;   // 强制重发，即使名字没变
+    this._sendHello();
   }
 
   // ---- requests --------------------------------------------------------------------------------
@@ -679,6 +727,9 @@ const K_WELCOME = 'sp.tokenWelcome'; // sessionStorage: { hash, at } from the fi
 const K_RECENT = 'sp.tokens';    // localStorage: this browser's recent tokens, most recent first
 const K_MATCHES = 'sp.matches'; // local metadata for explicit recovery of another closed tab's seat
 const K_ENTERED = 'sp.entered';  // sessionStorage: this tab passed the title screen
+// localStorage: 本设备的账号凭证（服务端签发）。放 localStorage 而不是 sessionStorage 是**有意的** ——
+// 它是「这台设备」的属性而不是「这个标签页」的：换标签页、关掉浏览器再开都还是同一个人。
+const K_ACCOUNT = 'sp.account';
 const RECENT_MAX = 4;
 const TOKEN_MAX_LEN = 64;        // protocol limit for hello.token
 const CHANNEL_NAME = 'sp.identity';
@@ -958,6 +1009,26 @@ export function createIdentity(deps = {}) {
     wasEntered: () => sget(session, K_ENTERED) === '1',
     /** @param {boolean} on */
     setEntered: (on) => (on ? sset(session, K_ENTERED, '1') : sdel(session, K_ENTERED)),
+
+    // ---- 账号（server/accounts.js）-----------------------------------------------------------------
+    // 这里只负责**存**凭证。谁是谁由服务端裁定，客户端从不自报 accountId —— 见 server/accounts.js 的三条设计。
+
+    /** @returns {string | null} 本设备存下来的账号凭证 */
+    getAccountToken() {
+      const t = sget(local, K_ACCOUNT);
+      return typeof t === 'string' && t.length > 0 && t.length <= 64 ? t : null;
+    },
+
+    /** 存下服务端签发的凭证（每次收到 `welcome.accountToken` 都要调，否则丢了只能靠密码或换名字）。 */
+    saveAccountToken(token) {
+      if (typeof token === 'string' && token.length > 0 && token.length <= 64) sset(local, K_ACCOUNT, token);
+    },
+
+    /**
+     * 忘掉本设备的凭证（换账号 / 主动退出时用）。
+     * **不会**删掉服务端的账号 —— 设过密码的话随时能用密码回来；没设密码就真的回不去了（界面上要讲清楚）。
+     */
+    forgetAccount() { sdel(local, K_ACCOUNT); },
   };
 }
 
@@ -965,4 +1036,9 @@ export function createIdentity(deps = {}) {
 export const identity = createIdentity({ onYield: () => net.reconnectNow(net.helloName || net.name) });
 
 /** Browser connection singleton (created lazily-safe: nothing touches the network until connect()). */
-export const net = new Net({ getToken: () => identity.getToken(), getTokenClaim: () => identity.getTokenClaim() });
+export const net = new Net({
+  getToken: () => identity.getToken(),
+  getTokenClaim: () => identity.getTokenClaim(),
+  getAccountToken: () => identity.getAccountToken(),
+  onAccountToken: (token) => identity.saveAccountToken(token),
+});

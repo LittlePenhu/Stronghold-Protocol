@@ -31,6 +31,8 @@ import { createPackRegistry } from './packs.js';
 import { MIME, COMPRESSIBLE, acceptsGzip, parseRange } from './http/files.js';
 import { BUILD_INPUTS, computeBuildTag, buildTag, resetBuildTag } from './http/buildTag.js';
 import { createRequestHandler } from './http/routes.js';
+import { openAccounts } from './accounts.js';
+import { openLeaderboard } from './leaderboard.js';
 import { answerClientError } from './http/common.js';
 import { lanUrls, displayHost, isProcessEntry, runMain } from './http/boot.js';
 
@@ -50,10 +52,13 @@ export {
  *   ratePerSec?: number, rateBurst?: number, maxConnections?: number, maxRooms?: number,
  *   maxConnectionsPerAddr?: number, maxRoomsPerAddr?: number, maxMatchesPerAddr?: number, resyncMinGapMs?: number,
  *   heavyPerSec?: number, heavyBurst?: number, trustProxy?: 'auto' | boolean, soloReconnectWindowMs?: number,
+ *   accountsFile?: string | null, leaderboardFile?: string | null,
  * }} [opts]
  * @returns {Promise<{ port: number, host: string, url: string, server: http.Server, wss: import('ws').WebSocketServer,
  *                     lobby: import('./lobby.js').Lobby, network: import('./net.js').Network,
  *                     registry: import('./net.js').SessionRegistry, packs: ReturnType<typeof createPackRegistry>,
+ *                     accounts: import('./accounts.js').Accounts | null,
+ *                     leaderboard: import('./leaderboard.js').Leaderboard | null,
  *                     close: () => Promise<void> }>}
  */
 export async function startServer(opts = {}) {
@@ -63,7 +68,35 @@ export async function startServer(opts = {}) {
 
   // The process-wide singleton serves the default data dir; a custom dir (tests) gets its own copy.
   const data = opts.dataDir ? loadData(dataDir, { log }) : getData({ dir: dataDir, log });
-  const { registry, lobby, network } = createSessionStack(opts, { data, log });
+
+  // 账号系统（server/accounts.js）。**只在显式配置时才启用**：
+  //   · 生产：compose 里设 SP_ACCOUNTS_FILE=/data/accounts.json —— 那个路径刻意放在游戏目录**之外**，
+  //     因为 deploy.sh 的 rsync 带 --delete，放在游戏目录里会被同步删掉（见 updater/README.md）。
+  //   · 测试：不配置 ⇒ accounts = null ⇒ Network 走"无账号"分支，握手行为与加账号之前完全一致，
+  //     所以那 74 个调用 startServer 的测试文件一个都不用改。
+  // 文件损坏时 openAccounts 会抛错，**故意让启动失败** —— 宁可服务起不来让人发现，
+  // 也不能把一堆账号静默当成空库清掉（那是不可逆的）。
+  const accountsFile = opts.accountsFile !== undefined
+    ? opts.accountsFile
+    : (process.env.SP_ACCOUNTS_FILE || null);
+  let accounts = null;
+  if (accountsFile) {
+    accounts = openAccounts({ file: accountsFile, log: { warn: log.warn.bind(log), error: log.error.bind(log) } });
+    log.info?.(`[accounts] 账号库已启用：${accounts.file}（${accounts.size} 个账号）`);
+  }
+
+  // 全服排行榜（server/leaderboard.js）。与账号库一样"只在显式配置时启用"，而且**依赖账号库**：
+  // 没有账号就没有「这局是谁的」，榜单无从记起 —— 所以 accounts 为空时它也不开（而不是记一堆无名成绩）。
+  const leaderboardFile = opts.leaderboardFile !== undefined
+    ? opts.leaderboardFile
+    : (process.env.SP_LEADERBOARD_FILE || null);
+  let leaderboard = null;
+  if (leaderboardFile && accounts) {
+    leaderboard = openLeaderboard({ file: leaderboardFile, log: { info: () => {}, warn: log.warn.bind(log), error: log.error.bind(log) } });
+    log.info?.(`[leaderboard] 全服排行榜已启用：${leaderboard.file}（${leaderboard.size} 个账号上榜）`);
+  }
+
+  const { registry, lobby, network } = createSessionStack({ ...opts, accounts, leaderboard }, { data, log });
   // content packs (docs/PACKS.md): scanned now — the start log names them — and again whenever their folders change
   const packs = createPackRegistry({ publicDir, dataDir, packsDir }, { log });
   packs.refresh(true);
@@ -73,7 +106,7 @@ export async function startServer(opts = {}) {
   resetBuildTag();
   buildTag();
 
-  const server = http.createServer(createRequestHandler({ serveStatic, health: { startedAt, network, registry, lobby }, log }));
+  const server = http.createServer(createRequestHandler({ serveStatic, health: { startedAt, network, registry, lobby, leaderboard }, log }));
   server.on('clientError', answerClientError);
   const wss = attachWebSocket(server, { network, log });
 
@@ -132,7 +165,7 @@ export async function startServer(opts = {}) {
     return closing;
   }
 
-  return { port: actualPort, host: boundHost, url, server, wss, lobby, network, registry, packs, close };
+  return { port: actualPort, host: boundHost, url, server, wss, lobby, network, registry, packs, accounts, leaderboard, close };
 }
 
 // `node server/index.js` / npm start: listen, print the banner, stop on SIGINT / SIGTERM (http/boot.js).

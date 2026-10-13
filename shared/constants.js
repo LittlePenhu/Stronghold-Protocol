@@ -148,6 +148,11 @@ export const ERR = Object.freeze({
   TEMP_NOT_EMPTY: 'TEMP_NOT_EMPTY',
   ELIMINATED: 'ELIMINATED',
   SPECTATOR: 'SPECTATOR',         // a spectator seat only watches (MAX_SPECTATORS)
+  // accounts (server/accounts.js) — 注册 / 登录（服务端签发凭证 + 可选密码）
+  NAME_TAKEN: 'NAME_TAKEN',       // 用户名已被占用：没有该账号的凭证或密码就进不来（这就是防串号那条线）
+  BAD_NAME: 'BAD_NAME',
+  BAD_CREDENTIALS: 'BAD_CREDENTIALS',
+  BAD_PASSWORD: 'BAD_PASSWORD',
   INTERNAL: 'INTERNAL',
 });
 
@@ -159,6 +164,10 @@ export const ERR_TEXT = {
   BAD_TILE: N_('无法部署在该位置'), BAD_TARGET: N_('无效的目标'), SOLD_OUT: N_('已售出'), MAX_LEVEL: N_('调度中心已达最高等级'),
   NOT_YOUR_TURN: N_('尚未轮到你'), ALREADY: N_('已完成该操作'), TEMP_NOT_EMPTY: N_('临时整备区不为空'), ELIMINATED: N_('你已被淘汰'),
   SPECTATOR: N_('观战中无法进行该操作'), INTERNAL: N_('服务器内部错误'),
+  NAME_TAKEN: N_('这个代号已经有人用了 —— 如果那是你，请用密码登录；否则换一个。'),
+  BAD_NAME: N_('代号不合法：1–12 个字符，首尾不能有空格，不能含不可见字符。'),
+  BAD_CREDENTIALS: N_('密码不正确'),
+  BAD_PASSWORD: N_('密码至少 6 位'),
 };
 
 // ---- Emotes (交流, research 09 §4) -----------------------------------------------------------------------------

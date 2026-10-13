@@ -379,7 +379,12 @@ const target = (v) => {
 export const C2S = {
   // session & lobby
   hello: { name: (v) => isStr(v, NAME_MAX_LEN) && v.trim().length > 0, token: (v) => v == null || isStr(v, 64), version: (v) => v == null || isInt(v, 0, 1e6),
-    noReplace: isBool, claimAt: (v) => isNum(v, 0, Number.MAX_SAFE_INTEGER), $optional: ['token', 'version', 'noReplace', 'claimAt'] },
+    noReplace: isBool, claimAt: (v) => isNum(v, 0, Number.MAX_SAFE_INTEGER),
+    // 账号系统 (server/accounts.js)：`accountToken` = 这台设备存下来的凭证；`accountPassword` = 「用户名 + 密码」
+    // 那条路（换设备 / 清了浏览器数据之后）。两个都可选 —— 第一次来的玩家都不带，服务端替他把名字注册下来。
+    // 注意**客户端从不自报 accountId**：身份一律由服务端从凭证/密码裁定（见 accounts.authenticate）。
+    accountToken: (v) => v == null || isStr(v, 64), accountPassword: (v) => v == null || isStr(v, 128),
+    $optional: ['token', 'version', 'noReplace', 'claimAt', 'accountToken', 'accountPassword'] },
   ping: { c: (v) => typeof v === 'number' && Number.isFinite(v) },
   'room.create': { mode: (v) => v === 'solo' || v === 'coop', difficulty: (v) => DIFFICULTIES.includes(v) },
   'room.join': { code: (v) => isStr(v, ROOM_CODE_LEN + 2) && /^[A-Za-z0-9]+$/.test(v) },

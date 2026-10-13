@@ -17,7 +17,7 @@ export const WS_MAX_PAYLOAD = 64 * 1024;
 
 /**
  * The session stack of one server.
- * @param {{ MatchClass?: Function, seedFn?: () => number, [option: string]: any }} opts startServer() options
+ * @param {{ MatchClass?: Function, seedFn?: () => number, accounts?: object | null, [option: string]: any }} opts startServer() options
  * @param {{ data: object, log: object }} deps the game data the lobby's matches use, the logger
  * @returns {{ registry: SessionRegistry, lobby: Lobby, network: Network }}
  */
@@ -25,8 +25,13 @@ export function createSessionStack(opts, { data, log }) {
   const netOptions = netOptionsFrom(opts);
   const registry = new SessionRegistry({ reconnectWindowMs: netOptions.reconnectWindowMs ?? NET_DEFAULTS.reconnectWindowMs });
   const lobbyOptions = lobbyOptionsFrom(opts);
-  const lobby = new Lobby({ registry, log, MatchClass: opts.MatchClass, getData: () => data, seedFn: opts.seedFn, options: lobbyOptions });
-  const network = new Network({ registry, handler: lobby, log, options: netOptions });
+  const lobby = new Lobby({
+    registry, log, MatchClass: opts.MatchClass, getData: () => data, seedFn: opts.seedFn,
+    options: lobbyOptions, leaderboard: opts.leaderboard || null,
+  });
+  // accounts (server/accounts.js) 由 startServer 打开后传进来；测试不传 ⇒ Network 里走"无账号"分支，
+  // 握手行为与加账号之前逐字节一致（这也是既有握手测试不用改的原因）。
+  const network = new Network({ registry, handler: lobby, log, options: netOptions, accounts: opts.accounts || null });
   return { registry, lobby, network };
 }
 
