@@ -11,11 +11,12 @@
 // pure CSS/SVG (radar, ridgelines, glow), so it never issues a request that can 404.
 
 import { ResumeMatchButton } from '../ui/resumeMatch.js';
-import { useMemo, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
 import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
 import { GuideButton } from '../ui/guide.js';
 import { openStats } from './stats.js';
+import { openRanks } from './ranks.js';
 import { toast } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual } from '../store.js';
@@ -194,6 +195,13 @@ export function TitleScreen() {
   useLang(); // re-render on a language switch
   const [name, setName] = useState(() => store.get().me.name || identity.loadName() || '');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 账号（server/accounts.js）：密码用于「换设备 / 清了浏览器数据后把账号找回来」。
+  // 平时根本不出现 —— 只有服务端拒绝握手（代号被占、密码错）或玩家自己点「用密码登录」才展开。
+  const [password, setPassword] = useState('');
+  const [askPassword, setAskPassword] = useState(false);
+  // 已发出 hello、正在等结果。**失败之前不让玩家进大厅** —— 不然他会在里面看到「未连接」却不知道为什么。
+  const [pending, setPending] = useState(false);
+  const errAtStart = useRef(null);
   const assetsSettled = useData('assets');
   const assets = data.get('assets');
   const backdrop = findUiAsset(assets, BACKDROP_KEYS);
@@ -209,10 +217,38 @@ export function TitleScreen() {
   const cssRidges = assetsSettled && (!ridges || ridgesFailed);
 
   const valid = isValidName(name);
+  const acctError = conn.lastError?.code || null;
+  const nameTaken = acctError === 'NAME_TAKEN';
+  const badCredentials = acctError === 'BAD_CREDENTIALS';
+  // 服务端说「这个代号有人了」或「密码不对」⇒ 展开密码输入框（那是唯一的自救方式）
+  const passwordMode = askPassword || nameTaken || badCredentials;
+
   const start = () => {
     if (!valid) { toast(t('请输入博士代号'), 'warn'); return; }
-    enterSession(name);
+    if (passwordMode && !password) { toast(t('请输入密码'), 'warn'); return; }
+    identity.saveName(name);
+    // 记下点下去那一刻的错误，好把这一次握手的结果与上一次的残影区分开
+    errAtStart.current = conn.lastError?.code || null;
+    net.setName(name);
+    if (passwordMode) net.usePassword(password);
+    setPending(true);
   };
+
+  // 等这一次 hello 的结果。**成功才真的进入** —— 失败就留在标题画面，
+  // 因为错误已经写进 conn.lastError，下面的提示条会把它显示出来。
+  // （如果直接进大厅，玩家会在里面看到「未连接」却不知道为什么，也没地方改代号。）
+  useEffect(() => {
+    if (!pending) return;
+    if (conn.status === 'online') {
+      setPending(false);
+      const finalName = net.serverName || name;
+      identity.setEntered(true);
+      store.set((s) => ({ me: { ...s.me, name: finalName }, session: { ...s.session, entered: true } }));
+      return;
+    }
+    const code = conn.lastError?.code || null;
+    if (code && code !== errAtStart.current) setPending(false);
+  }, [pending, conn.status, conn.lastError]);
 
   const online = conn.status === 'online' || conn.status === 'connected';
   const dotClass = online ? 'is-on' : conn.status === 'reconnecting' || conn.status === 'connecting' || conn.status === 'handshaking' ? 'is-warn' : 'is-bad';
@@ -249,6 +285,7 @@ export function TitleScreen() {
       <div>
         <div class="title-corner__tools">
           <${Button} variant="ghost" size="sm" icon="chart" class="title-stats" onClick=${openStats} title=${t('统计数据')}>${t('统计')}<//>
+          <${Button} variant="ghost" size="sm" icon="crown" class="title-ranks" onClick=${openRanks} title=${t('全服排行榜')}>${t('排行')}<//>
           <${LangToggle} class="title-lang" />
         </div>
         <${MicroLabel} tone="hi">TARGET POINT<//><br /><${MicroLabel}>STRONGHOLD PROTOCOL<//>
@@ -269,10 +306,20 @@ export function TitleScreen() {
           <${Icon} name="key" />
           <span>${t('收到同盟邀请')}</span><b class="num">${pendingJoin}</b><span class="t-lo">${t('· 输入代号后将自动加入')}</span>
         </div>` : null}
+        ${nameTaken || badCredentials ? html`<div class="title-invite" role="alert">
+          <${Icon} name="info" />
+          <span>${nameTaken
+            ? t('这个代号已经有人用了 —— 如果那是你，用密码登录；否则换一个。')
+            : t('密码不正确')}</span>
+        </div>` : null}
         <${TextField} label=${t('博士代号')} micro="CALLSIGN" size="lg" icon="user" value=${name} maxLength=${NAME_MAX_LEN}
           placeholder=${t('输入你的代号（最多 {NAME_MAX_LEN} 字）', { NAME_MAX_LEN })} autoFocus=${!touchUi}
           onInput=${setName} onEnter=${start} />
-        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" disabled=${!valid} onClick=${start}>${t('开始')}<//>
+        ${passwordMode ? html`<${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"
+          value=${password} maxLength=${128} onInput=${setPassword} onEnter=${start} />` : null}
+        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" disabled=${!valid || pending} onClick=${start}>${passwordMode ? t('用密码登录') : t('开始')}<//>
+        ${!passwordMode && valid ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAskPassword(true)}>
+          ${t('换设备了？用密码登录')}</button>` : null}
         <div class="title-conn">
           <span class=${`status-dot ${dotClass}`}></span>
           <span>${STATUS_TEXT[conn.status] ? t(STATUS_TEXT[conn.status]) : conn.status}</span>

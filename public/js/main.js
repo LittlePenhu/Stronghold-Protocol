@@ -50,6 +50,7 @@ import { GuideHost } from './ui/guide.js';
 import { installDeviceSupport } from './ui/device.js';
 import { LoadoutHost } from './screens/loadout.js';
 import { StatsHost } from './screens/stats.js';
+import { RanksHost } from './screens/ranks.js';
 import { recordResult, installStatsRecorder } from './ui/stats.js';
 import { installLoadoutSync, installOwnershipSync, installDiySync } from './ui/loadoutSync.js';
 import { startBuildGuard } from './ui/buildGuard.js';
@@ -309,6 +310,7 @@ function App() {
     <${GuideHost} />
     <${LoadoutHost} />
     <${StatsHost} />
+    <${RanksHost} />
   </div>`;
 }
 
