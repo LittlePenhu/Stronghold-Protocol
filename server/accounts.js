@@ -32,15 +32,27 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { NAME_MAX_LEN } from '../shared/constants.js';
 
 /** 文件格式版本；将来改结构时用它做迁移。 */
 export const ACCOUNTS_FORMAT = 1;
 
-/** 用户名长度上限（与协议里的 NAME_MAX_LEN 保持同一量级）。 */
-export const NAME_MAX = 16;
+/** 用户名长度上限 —— 直接取协议的名字上限（hello 的 `name` 也是这个数），
+ *  这样"账号库允许的长度"与"协议允许的长度"永远是同一个，玩家不会遇到
+ *  输入 13 个字拿到「无效的请求」而不是「代号太长」这种事。 */
+export const NAME_MAX = NAME_MAX_LEN;
 /** 密码长度上下限。 */
 export const PASSWORD_MIN = 6;
 export const PASSWORD_MAX = 128;
+
+/**
+ * 一个账号最多同时持有几个设备凭证。
+ * 为什么是"多个"而不是一个：如果只留一个，那"在第二台设备用密码登录"必然让第一台失效 ——
+ * 手机会把电脑踢掉、电脑又把手机踢掉，来回抢座位。token 存哈希、每个 32 字节，
+ * 8 个的开销可以忽略；超出时淘汰**最旧的**（按 createdAt，不看活跃度 —— 活跃时间要写盘才准，
+ * 而每次心跳都写盘是浪费；注册顺序是确定且不依赖额外状态的）。
+ */
+export const MAX_TOKENS = 8;
 
 /** scrypt 参数。N=2^14 在服务器上约 50ms，够挡离线爆破又不至于拖慢登录。 */
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 };
@@ -169,9 +181,15 @@ export class Accounts {
     }
     for (const [id, rec] of Object.entries(data.accounts)) {
       if (!rec || typeof rec !== 'object' || !rec.name) continue;
+      // 兼容最早那一版（单个 `tokenHash`）：账号系统上线前没有存量数据，这行只是为了
+      // 将来若有人手改过文件、或从中间版本升上来时不会把凭证静默读丢。
+      if (!Array.isArray(rec.tokens)) {
+        rec.tokens = rec.tokenHash ? [{ hash: rec.tokenHash, createdAt: rec.createdAt || now() }] : [];
+      }
+      delete rec.tokenHash;
       this.byId.set(id, rec);
       this.byName.set(rec.nameLower || normalizeName(rec.name), id);
-      if (rec.tokenHash) this.byToken.set(rec.tokenHash, id);
+      for (const tk of rec.tokens) if (tk?.hash) this.byToken.set(tk.hash, id);
     }
     this.loaded = true;
     return this;
@@ -240,14 +258,14 @@ export class Accounts {
       id,
       name: clean,
       nameLower: normalizeName(clean),
-      tokenHash: sha256(token),
+      tokens: [{ hash: sha256(token), createdAt: t }],
       password: password != null ? hashPassword(password) : null,
       createdAt: t,
       updatedAt: t,
     };
     this.byId.set(id, rec);
     this.byName.set(rec.nameLower, id);
-    this.byToken.set(rec.tokenHash, id);
+    this.byToken.set(rec.tokens[0].hash, id);
     this.dirty = true;
     this.save();
     return { account: rec, token };
@@ -299,27 +317,101 @@ export class Accounts {
   }
 
   /**
-   * 换发凭证：旧的立即失效。
-   * 用途：怀疑凭证泄露、或者换设备时把凭证带走之后再作废旧的。
+   * 给账号**追加**一个设备凭证（不撤销已有的）。
+   * 用于「在第二台设备上用密码登录成功」—— 那种情况不该把第一台踢下线。
+   * 超过 `MAX_TOKENS` 时淘汰最旧的一个（按 createdAt）。
    * @returns {{ account: any, token: string }}
    */
-  rotateCredential(accountId) {
+  issueToken(accountId) {
     const rec = this.byId.get(accountId);
     if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
-    if (rec.tokenHash) this.byToken.delete(rec.tokenHash);
     const token = newToken();
-    rec.tokenHash = sha256(token);
+    const hash = sha256(token);
+    rec.tokens.push({ hash, createdAt: now() });
+    while (rec.tokens.length > MAX_TOKENS) {
+      const dropped = rec.tokens.shift();
+      if (dropped?.hash && dropped.hash !== hash) this.byToken.delete(dropped.hash);
+    }
     rec.updatedAt = now();
-    this.byToken.set(rec.tokenHash, accountId);
+    this.byToken.set(hash, accountId);
     this.dirty = true;
     this.save();
     return { account: rec, token };
   }
 
-  /** 给外部看的账号快照（**不含** tokenHash / password，避免不小心漏给客户端）。 */
+  /** 撤销一个凭证（凭证泄露，或玩家主动「退出这台设备」）。@returns {boolean} 是否确实撤销了 */
+  revokeToken(token) {
+    if (typeof token !== 'string' || !token) return false;
+    const hash = sha256(token);
+    const id = this.byToken.get(hash);
+    if (!id) return false;
+    const rec = this.byId.get(id);
+    if (rec) {
+      rec.tokens = rec.tokens.filter((t) => t.hash !== hash);
+      rec.updatedAt = now();
+      this.dirty = true;
+      this.save();
+    }
+    this.byToken.delete(hash);
+    return true;
+  }
+
+  /**
+   * 撤销账号的**全部**凭证（密码本身不变）。
+   * 用途：怀疑串号、或玩家说"我的号被别人上了"时的应急处理 —— 撤完之后只有密码能进来。
+   * 账号记录本身保留，历史成绩不受影响。
+   */
+  revokeAllTokens(accountId) {
+    const rec = this.byId.get(accountId);
+    if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
+    for (const tk of rec.tokens) this.byToken.delete(tk.hash);
+    rec.tokens = [];
+    rec.updatedAt = now();
+    this.dirty = true;
+    this.save();
+    return rec;
+  }
+
+  /**
+   * 统一认证入口：把「客户端在 hello 里给了什么」翻译成「这是哪个账号」。
+   *
+   * 判定顺序（顺序本身是安全设计的一部分）：
+   *   1. **设备凭证优先** —— 能对上就是它。名字只用于显示，客户端带了什么都无所谓
+   *      （所以玩家没法靠改输入框"成为"别人）。
+   *   2. 凭证明细对不上时看**用户名**：
+   *      · 名字空闲 ⇒ 注册新账号（带密码就一起设上）
+   *      · 名字已被占用 ⇒ 只有**密码**能进来；没密码就拒绝（这就是"不串号"那条线）
+   *
+   * @param {{ name?: string, token?: string|null, password?: string|null }} [input]
+   * @returns {{ account: any, token: string|null, created: boolean }}
+   *          `token` 非 null 时表示这是**服务端新签发的凭证**，必须回给客户端保存。
+   * @throws {AccountError}
+   */
+  authenticate({ name, token = null, password = null } = {}) {
+    const existing = this.byCredential(token);
+    if (existing) return { account: existing, token: null, created: false };
+
+    const clean = String(name ?? '').normalize('NFKC').trim();
+    const bad = nameProblem(clean);
+    if (bad) throw new AccountError(ERR.BAD_NAME, bad);
+
+    const owner = this.byName_(clean);
+    if (owner) {
+      // 名字被占了。密码是唯一的入口 —— 密码错和"没设密码"对外都是 BAD_CREDENTIALS。
+      if (password == null) throw new AccountError(ERR.NAME_TAKEN);
+      const rec = this.loginWithPassword(clean, password); // 失败会抛 BAD_CREDENTIALS
+      const { token: fresh } = this.issueToken(rec.id);
+      return { account: rec, token: fresh, created: false };
+    }
+
+    const { account, token: fresh } = this.register(clean, password);
+    return { account, token: fresh, created: true };
+  }
+
+  /** 给外部看的账号快照（**不含** 凭证哈希 / 密码，避免不小心漏给客户端）。 */
   publicView(account) {
     if (!account) return null;
-    return { id: account.id, name: account.name, hasPassword: !!account.password };
+    return { id: account.id, name: account.name, hasPassword: !!account.password, devices: account.tokens?.length || 0 };
   }
 
   /** 全量快照列表（管理用途）。 */

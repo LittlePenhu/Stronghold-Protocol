@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   Accounts, AccountError, ERR, openAccounts,
-  normalizeName, nameProblem, ACCOUNTS_FORMAT, NAME_MAX, PASSWORD_MIN,
+  normalizeName, nameProblem, ACCOUNTS_FORMAT, NAME_MAX, PASSWORD_MIN, MAX_TOKENS,
 } from '../server/accounts.js';
 
 let seq = 0;
@@ -59,7 +59,7 @@ describe('accounts: 注册与凭证（防串号的核心）', () => {
     // 磁盘上没有明文凭证
     const raw = fs.readFileSync(file, 'utf8');
     assert.equal(raw.includes(token), false, '文件里不该出现明文凭证');
-    assert.equal(raw.includes(account.tokenHash), true);
+    assert.equal(raw.includes(account.tokens[0].hash), true);
     // 也不该出现明文密码
     const b = fresh(file);
     b.setPassword(account.id, 'hunter2hunter2');
@@ -149,7 +149,7 @@ describe('accounts: 密码（可选）', () => {
   });
 });
 
-describe('accounts: 改名与凭证轮换', () => {
+describe('accounts: 改名与凭证管理', () => {
   test('★ 改名不换 accountId —— 历史成绩不会分裂成两份', () => {
     const a = fresh();
     const { account, token } = a.register('旧名');
@@ -173,26 +173,163 @@ describe('accounts: 改名与凭证轮换', () => {
     assert.doesNotThrow(() => a.rename(b.account.id, '乙'));
   });
 
-  test('轮换凭证：新的能用，旧的立刻失效', () => {
+  test('★ 追加凭证（换设备用密码登录）不该把旧设备踢下线', () => {
     const a = fresh();
-    const { account, token: old } = a.register('甲');
-    const { token: next } = a.rotateCredential(account.id);
-    assert.notEqual(next, old);
-    assert.equal(a.byCredential(old), null, '旧凭证必须失效');
-    assert.equal(a.byCredential(next).id, account.id);
-    // 轮换后重开文件，旧的依然不认
+    const { account, token: phone } = a.register('甲', 'pw123456');
+    // 第二台设备用密码登录 → 服务端给它一条**新的**凭证
+    const { token: desktop } = a.issueToken(account.id);
+    assert.notEqual(desktop, phone);
+    // 两条都有效，都指向同一个账号 —— 不是"抢座位"
+    assert.equal(a.byCredential(phone).id, account.id);
+    assert.equal(a.byCredential(desktop).id, account.id);
+    // 重开文件后依然都在
     const reopened = fresh(a.file);
-    assert.equal(reopened.byCredential(old), null);
-    assert.equal(reopened.byCredential(next).id, account.id);
+    assert.equal(reopened.byCredential(phone).id, account.id);
+    assert.equal(reopened.byCredential(desktop).id, account.id);
   });
 
-  test('publicView 不泄漏 tokenHash / password', () => {
+  test('凭证数量有上限，超出时淘汰最旧的（不会无限增长）', () => {
+    const a = fresh();
+    const { account } = a.register('甲');
+    const issued = [];
+    for (let i = 0; i < MAX_TOKENS + 3; i++) issued.push(a.issueToken(account.id).token);
+    assert.equal(a.byAccountId(account.id).tokens.length, MAX_TOKENS);
+    // 最早签发的那几条已被淘汰
+    assert.equal(a.byCredential(issued[0]), null);
+    assert.equal(a.byCredential(issued[1]), null);
+    // 最新的几条仍然有效
+    assert.equal(a.byCredential(issued.at(-1)).id, account.id);
+    // 淘汰掉的哈希不能留在索引里（否则 revokeToken 会去操作一个不存在的凭证）
+    assert.equal(a.byToken.size, MAX_TOKENS);
+  });
+
+  test('撤销凭证：这一条失效，账号的其他设备不受影响', () => {
+    const a = fresh();
+    const { account, token: one } = a.register('甲');
+    const { token: two } = a.issueToken(account.id);
+    assert.equal(a.revokeToken(one), true);
+    assert.equal(a.byCredential(one), null, '被撤销的必须失效');
+    assert.equal(a.byCredential(two).id, account.id, '其他设备不受影响');
+    // 撤销不存在的凭证返回 false（幂等，不抛）
+    assert.equal(a.revokeToken('0'.repeat(32)), false);
+    assert.equal(a.revokeToken(null), false);
+    // 全部撤销后账号还在，只是没有可用凭证了
+    a.revokeAllTokens(account.id);
+    assert.equal(a.byAccountId(account.id).tokens.length, 0);
+    assert.equal(a.size, 1, '账号本身不该被删掉');
+  });
+
+  test('publicView 不泄漏凭证哈希 / 密码', () => {
     const a = fresh();
     const { account } = a.register('甲', 'pw123456');
     const v = a.publicView(account);
-    assert.deepEqual(Object.keys(v).sort(), ['hasPassword', 'id', 'name']);
-    assert.equal(JSON.stringify(v).includes(account.tokenHash), false);
+    assert.deepEqual(Object.keys(v).sort(), ['devices', 'hasPassword', 'id', 'name']);
+    assert.equal(JSON.stringify(v).includes(account.tokens[0].hash), false);
     assert.equal(JSON.stringify(v).includes(account.password.hash), false);
+  });
+});
+
+describe('accounts: authenticate —— 统一认证入口（防串号的最后一道门）', () => {
+  test('凭证对得上就认它，名字填什么都无所谓（玩家不能靠改输入框"成为"别人）', () => {
+    const a = fresh();
+    const { account, token } = a.register('喷壶');
+    for (const name of ['喷壶', 'penhu', '管理员', '']) {
+      const r = a.authenticate({ name, token });
+      assert.equal(r.account.id, account.id, `name=${name} 时不该换人`);
+      assert.equal(r.created, false);
+      assert.equal(r.token, null, '已有凭证时不该再签发');
+    }
+  });
+
+  test('名字空闲 ⇒ 注册新账号并签发凭证', () => {
+    const a = fresh();
+    const r = a.authenticate({ name: '新来的' });
+    assert.equal(r.created, true);
+    assert.equal(r.account.name, '新来的');
+    assert.ok(typeof r.token === 'string' && r.token.length === 32);
+    assert.equal(a.byCredential(r.token).id, r.account.id);
+  });
+
+  test('★ 名字被占用 + 没有凭证 + 没有密码 ⇒ 拒绝（这正是"用户名不能当密码"）', () => {
+    const a = fresh();
+    a.register('PenHu');
+    assert.throws(
+      () => a.authenticate({ name: 'PenHu' }),
+      (e) => e instanceof AccountError && e.code === ERR.NAME_TAKEN,
+    );
+    // 大小写 / 全角 / 首尾空白变体一样被挡住（用拉丁名测 —— 中文名没有大小写变体）
+    for (const variant of ['PENHU', 'ｐｅｎｈｕ', ' PenHu ', 'penhu']) {
+      assert.throws(() => a.authenticate({ name: variant }), (e) => e.code === ERR.NAME_TAKEN, variant);
+    }
+    // 用别人账号的 accountId 当凭证也没用
+    const victim = a.byName_('PenHu');
+    assert.throws(() => a.authenticate({ name: 'PenHu', token: victim.id }), (e) => e.code === ERR.NAME_TAKEN);
+  });
+
+  test('名字被占用 + 密码正确 ⇒ 放行并追加一条新凭证（换设备）', () => {
+    const a = fresh();
+    const first = a.authenticate({ name: '喷壶', password: 'pw123456' });
+    assert.equal(first.created, true);
+    const second = a.authenticate({ name: '喷壶', password: 'pw123456' });
+    assert.equal(second.account.id, first.account.id, '必须是同一个账号');
+    assert.equal(second.created, false);
+    assert.ok(second.token, '换设备登录应拿到新凭证');
+    assert.equal(a.byCredential(first.token).id, first.account.id, '旧设备仍有效');
+    assert.equal(a.byCredential(second.token).id, first.account.id);
+  });
+
+  test('名字被占用 + 密码错 ⇒ BAD_CREDENTIALS（与"没设密码"不可区分）', () => {
+    const a = fresh();
+    a.register('甲', 'pw123456');
+    a.register('乙');   // 这个没设密码
+    assert.throws(() => a.authenticate({ name: '甲', password: 'wrong' }), (e) => e.code === ERR.BAD_CREDENTIALS);
+    assert.throws(() => a.authenticate({ name: '乙', password: 'x' }), (e) => e.code === ERR.BAD_CREDENTIALS);
+  });
+
+  test('★ 两条不同凭证同时在线，互不串号', () => {
+    const a = fresh();
+    const one = a.authenticate({ name: '甲' });
+    const two = a.authenticate({ name: '乙' });
+    assert.notEqual(one.account.id, two.account.id);
+    // 各自拿各自的凭证，反复认证都不会换人
+    for (let i = 0; i < 5; i++) {
+      assert.equal(a.authenticate({ name: '随便', token: one.token }).account.id, one.account.id);
+      assert.equal(a.authenticate({ name: '随便', token: two.token }).account.id, two.account.id);
+    }
+    // 交叉：甲的凭证 + 乙的名字 ⇒ 还是甲（凭证优先）
+    assert.equal(a.authenticate({ name: '乙', token: one.token }).account.id, one.account.id);
+  });
+
+  test('凭证无效时不会被静默降级成"新注册"（否则一次凭证出错就多出一个重名账号）', () => {
+    const a = fresh();
+    const { account } = a.register('喷壶');
+    // 一个长得像但不对的凭证
+    assert.throws(() => a.authenticate({ name: '喷壶', token: 'f'.repeat(32) }), (e) => e.code === ERR.NAME_TAKEN);
+    assert.equal(a.size, 1, '不该多出账号');
+    assert.equal(a.byAccountId(account.id).tokens.length, 1, '不该多出凭证');
+  });
+
+  test('非法用户名在注册路径上被拒（authenticate 也走同一套校验）', () => {
+    const a = fresh();
+    assert.throws(() => a.authenticate({ name: '   ' }), (e) => e.code === ERR.BAD_NAME);
+    assert.throws(() => a.authenticate({ name: 'x'.repeat(NAME_MAX + 1) }), (e) => e.code === ERR.BAD_NAME);
+    assert.equal(a.size, 0);
+  });
+
+  test('老格式（单个 tokenHash）的文件仍能读进来', () => {
+    const file = tmpFile();
+    // 手写一份"上一版"的文件：凭证哈希存在 tokenHash 里
+    const hash = 'ab'.repeat(32);
+    fs.writeFileSync(file, JSON.stringify({
+      format: ACCOUNTS_FORMAT,
+      accounts: {
+        a_legacy: { id: 'a_legacy', name: '老人', nameLower: '老人', tokenHash: hash, password: null, createdAt: 1, updatedAt: 1 },
+      },
+    }, null, 2));
+    const a = fresh(file);
+    assert.equal(a.size, 1);
+    assert.equal(a.byAccountId('a_legacy').tokens.length, 1, '单个 tokenHash 应被升级成 tokens 数组');
+    assert.equal(a.byAccountId('a_legacy').tokenHash, undefined, '旧字段应被清掉');
   });
 });
 
