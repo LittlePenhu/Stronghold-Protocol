@@ -156,6 +156,8 @@ export class Net {
     this.playerId = null;
     /** @type {string | null} 服务端裁定的账号 id（全服排行榜的归属）；服务端不启用账号系统时恒为 null */
     this.accountId = null;
+    /** @type {boolean | null} 这个账号设没设密码（welcome.accountHasPassword：标题画面据此显示「设置/修改密码」） */
+    this.accountHasPassword = null;
     this.attempt = 0;          // consecutive failed connection attempts
     this.retryAt = 0;          // epoch ms of the next reconnect attempt (0 = none)
     this.ping = null;          // last RTT in ms
@@ -428,6 +430,7 @@ export class Net {
     this.playerId = msg.playerId ?? null;
     // 账号：accountId 是服务端裁定的归属（全服排行榜按它记账）；服务端没启用账号系统时就是 null。
     this.accountId = typeof msg.accountId === 'string' && msg.accountId ? msg.accountId : null;
+    this.accountHasPassword = typeof msg.accountHasPassword === 'boolean' ? msg.accountHasPassword : null;
     if (typeof msg.accountToken === 'string' && msg.accountToken) {
       try { this.onAccountToken?.(msg.accountToken, msg); } catch (e) { console.error('[net] onAccountToken failed', e); }
     }

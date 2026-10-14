@@ -638,6 +638,8 @@ export class Network {
     }
     if (msg.t === 'hello') { this.onHelloMsg(conn, msg, now); return; }
     if (!conn.session) { this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'hello required')); return; }
+    // 账号消息在 net 层处理（账号属于会话身份，不属于房间）—— 见 onSetPasswordMsg
+    if (msg.t === 'account.setPassword') { this.onSetPasswordMsg(conn, msg, rid); return; }
     if (HEAVY_TYPES.has(msg.t) && !conn.heavy.take(now)) { this.reply(conn, errorMsg(ERR.RATE, rid, `${msg.t} too often`)); return; }
 
     let res;
@@ -675,6 +677,8 @@ export class Network {
     /** @type {string | null} 本次新签发的设备凭证（有值就必须回给客户端存下来） */
     let issuedToken = null;
     let accountNew = false;
+    /** @type {boolean | null} 账号当前有没有密码（welcome.accountHasPassword：客户端据此显示「设置/修改密码」） */
+    let accountHasPassword = null;
     if (!session) {
       session = msg.token ? this.registry.byToken(msg.token) : null;
       if (session) {
@@ -706,7 +710,7 @@ export class Network {
     // （不然「输入别人的名字」就等于「变成别人」——正是这个系统要挡的事。）改名走 accounts.rename。
     if (this.accounts && session.accountId) {
       const rec = this.accounts.byAccountId(session.accountId);
-      if (rec) name = rec.name;
+      if (rec) { name = rec.name; accountHasPassword = !!rec.password; }
       // 账号在库里已经不存在了（管理员手工清过库）：降级成无账号 session，
       // 而不是让它继续对外声称一个不存在的 accountId —— 那会让排行榜写进一个孤儿 id。
       else session.accountId = null;
@@ -720,6 +724,7 @@ export class Network {
     try { extra = this.handler.welcomeInfo?.() ?? null; } catch (e) { this.log.error('[net] welcomeInfo crashed', e); }
     const welcome = { ...(extra && typeof extra === 'object' ? extra : null), t: 'welcome', playerId: session.playerId, token: session.token, name: session.name, serverNow: now, version: PROTOCOL_VERSION, resumed };
     if (session.accountId) welcome.accountId = session.accountId;
+    if (accountHasPassword != null) welcome.accountHasPassword = accountHasPassword;
     if (issuedToken) {
       welcome.accountToken = issuedToken;              // 只在签发的那一次回给客户端
       if (accountNew) welcome.accountNew = true;       // 用来让客户端说一句「账号已创建」
@@ -756,6 +761,33 @@ export class Network {
       return { error: ERR.INTERNAL };
     }
     return { accountId: auth.account.id, name: auth.account.name, token: auth.token, created: auth.created };
+  }
+
+  /**
+   * `account.setPassword` —— 给**当前会话**的账号设置 / 更换密码。
+   *
+   * 身份只看 `session.accountId`（服务端从凭证 / 密码裁定出来的），消息里没有、也不接受任何名字或 id ——
+   * 所以这条路永远改的是「你自己」的账号，不存在「改别人的密码」。密码只是备用钥匙：
+   * 设 / 改密码**不动任何设备凭证**，老设备不该因为新设备设了密码就被踢下线。
+   * @param {Connection} conn @param {{ password: string }} msg @param {unknown} rid
+   */
+  onSetPasswordMsg(conn, msg, rid) {
+    const session = conn.session;
+    if (!this.accounts || !session || !session.accountId) {
+      // 服务端没开账号系统，或这个会话没有账号（无账号会话没有「自己的密码」可言）
+      this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'no account on this session'));
+      return;
+    }
+    try {
+      this.accounts.setPassword(session.accountId, msg.password);
+    } catch (e) {
+      const code = ACCOUNT_ERR[e?.code];
+      if (code) { this.reply(conn, errorMsg(code, rid, e.code)); return; }
+      this.log.error('[net] account store error', e);  // 不回 detail：里面可能有文件路径
+      this.reply(conn, errorMsg(ERR.INTERNAL, rid));
+      return;
+    }
+    if (validRid(rid)) this.reply(conn, { t: 'ok', rid });
   }
 
   /** The session moved to a new socket: unbind and close the old one without firing a disconnect. */

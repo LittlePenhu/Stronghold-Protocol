@@ -17,7 +17,7 @@ import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/compo
 import { GuideButton } from '../ui/guide.js';
 import { openStats } from './stats.js';
 import { openRanks } from './ranks.js';
-import { toast } from '../ui/toasts.js';
+import { toast, toastError } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual } from '../store.js';
 import { data, useData } from '../data.js';
@@ -199,6 +199,11 @@ export function TitleScreen() {
   // 平时根本不出现 —— 只有服务端拒绝握手（代号被占、密码错）或玩家自己点「用密码登录」才展开。
   const [password, setPassword] = useState('');
   const [askPassword, setAskPassword] = useState(false);
+  // 「设置 / 修改密码」：给**当前账号**补一把备用钥匙（设备凭证丢了时靠「代号 + 密码」找回）。
+  // 只有已经带着账号在线（welcome.accountId）才出现 —— 注册时没设密码的账号从此有了补救入口。
+  const [pwSetOpen, setPwSetOpen] = useState(false);
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
   // 已发出 hello、正在等结果。**失败之前不让玩家进大厅** —— 不然他会在里面看到「未连接」却不知道为什么。
   const [pending, setPending] = useState(false);
   const errAtStart = useRef(null);
@@ -225,6 +230,21 @@ export function TitleScreen() {
   const noPassword = acctError === 'NO_PASSWORD';
   // 服务端说「这个代号有人了」或「密码不对」⇒ 展开密码输入框（那是唯一的自救方式）
   const passwordMode = askPassword || nameTaken || badCredentials;
+  // 已经带着账号在线（welcome 回了 accountId）才谈得上「给这个账号设密码」
+  const hasAccount = conn.status === 'online' && !!net.accountId;
+
+  /** 给当前账号设置 / 更换密码（account.setPassword）：身份由服务端裁定，改的永远是"自己"的账号。 */
+  const submitSetPassword = () => {
+    if (pwNew.length < 6) { toast(t('密码至少 6 位'), 'warn'); return; }
+    if (pwNew !== pwConfirm) { toast(t('两次输入的密码不一致'), 'warn'); return; }
+    net.request('account.setPassword', { password: pwNew }).then(() => {
+      net.accountHasPassword = true;
+      setPwSetOpen(false);
+      setPwNew('');
+      setPwConfirm('');
+      toast(t('密码已设置 —— 换设备时用「代号 + 密码」即可找回账号'), 'success');
+    }).catch((err) => toastError(err));
+  };
 
   /** 从「这个代号没密码」的死角里退出来：清掉本地凭证，重新以新代号开始。 */
   const resetAccount = () => {
@@ -344,6 +364,17 @@ export function TitleScreen() {
           ${noPassword ? t('开始') : passwordMode ? t('用密码登录') : t('开始')}<//>
         ${!passwordMode && valid ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAskPassword(true)}>
           ${t('换设备了？用密码登录')}</button>` : null}
+        ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setPwSetOpen(!pwSetOpen)}>
+          ${net.accountHasPassword ? t('修改密码') : t('设置密码')}</button>` : null}
+        ${pwSetOpen && hasAccount && !passwordMode ? html`<div class="title-pwset">
+          <p class="title-pwset__hint t-lo">${t('设置密码后，换设备或清了浏览器数据时，可用「代号 + 密码」找回账号。')}</p>
+          <${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"
+            value=${pwNew} maxLength=${128} onInput=${setPwNew} onEnter=${submitSetPassword} />
+          <${TextField} label=${t('确认密码')} micro="CONFIRM" size="lg" icon="key" type="password"
+            value=${pwConfirm} maxLength=${128} onInput=${setPwConfirm} onEnter=${submitSetPassword} />
+          <${Button} variant="primary" size="lg" block=${true} disabled=${!pwNew || !pwConfirm} onClick=${submitSetPassword}>
+            ${net.accountHasPassword ? t('修改密码') : t('设置密码')}<//>
+        </div>` : null}
         <div class="title-conn">
           <span class=${`status-dot ${dotClass}`}></span>
           <span>${STATUS_TEXT[conn.status] ? t(STATUS_TEXT[conn.status]) : conn.status}</span>

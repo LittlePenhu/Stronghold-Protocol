@@ -386,6 +386,10 @@ export const C2S = {
     accountToken: (v) => v == null || isStr(v, 64), accountPassword: (v) => v == null || isStr(v, 128),
     $optional: ['token', 'version', 'noReplace', 'claimAt', 'accountToken', 'accountPassword'] },
   ping: { c: (v) => typeof v === 'number' && Number.isFinite(v) },
+  // 给**当前会话**的账号设置 / 更换密码（身份由服务端 session.accountId 裁定，客户端报什么名字都不参与）。
+  // 密码是「换设备 / 清了浏览器数据后把账号找回来」的那把备用钥匙：设备凭证丢了它就是唯一的入口。
+  // 长度下限由 server/accounts.js setPassword 判（BAD_PASSWORD），这里只挡结构性坏消息。
+  'account.setPassword': { password: (v) => isStr(v, 128) },
   'room.create': { mode: (v) => v === 'solo' || v === 'coop', difficulty: (v) => DIFFICULTIES.includes(v) },
   'room.join': { code: (v) => isStr(v, ROOM_CODE_LEN + 2) && /^[A-Za-z0-9]+$/.test(v) },
   'room.leave': {},

@@ -242,6 +242,9 @@
 }
 .title-invite .icon { width: .2rem; height: .2rem; }
 .title-invite b { font-size: calc(.2 * var(--t)); letter-spacing: .2em; color: #ffd08a; }
+/* 「设置 / 修改密码」表单（account.setPassword）：给当前账号补一把换设备时用的备用钥匙 */
+.title-pwset { display: flex; flex-direction: column; gap: .12rem; margin-top: .12rem; padding: .12rem; border: 1px solid var(--line-2); background: rgba(0, 0, 0, .3); }
+.title-pwset__hint { margin: 0; font-size: calc(.14 * var(--t)); line-height: 1.6; }
 .title-conn { display: flex; align-items: center; justify-content: center; gap: .1rem; min-height: .32rem; font-size: calc(.14 * var(--t)); color: var(--text-lo); }
 /* 统计 (the local stats page) beside the language menu in the top-right corner */
 .title-corner__tools { display: flex; align-items: center; justify-content: flex-end; gap: .1rem; margin-bottom: .1rem; }
