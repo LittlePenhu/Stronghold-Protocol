@@ -8,7 +8,7 @@
 // Usage:
 //   node tools/golden.mjs                 compare the corpus with test/golden/*.json (exit 1 on a difference)
 //   node tools/golden.mjs --update        recompute and rewrite test/golden/*.json   (npm run golden:update)
-//   options: --family roster,bonds,fields,matches,standins   --fast (the test's default subset)   --only <id,id>
+//   options: --family roster,bonds,fields,matches,standins   --fast (the quick local subset; npm test runs the whole corpus)   --only <id,id>
 //            --jobs N (worker threads, default: up to 4)   --list   --coverage (skills cast, stages, enemies…)
 //            --twice  determinism: compute twice in this process (the second pass in reverse order) and compare
 //
@@ -1031,7 +1031,8 @@ const ABOUT = {
   diy: '自选 pieces: every kitted owned 6★ × form (tiers 5 / 6, normal / elite × module) × skill, every kitted prototype at its locked selection',
 };
 /**
- * The default test subset (GOLDEN_FULL=1 runs everything): the pass-0 roster battles (every chess record with its
+ * The fast subset (`GOLDEN_FAST=1 node --test test/golden.test.js` / `tools/golden.mjs --fast`; `npm test` and
+ * `npm run golden` run everything): the pass-0 roster battles (every chess record with its
  * default loadout, every stage, every non-leader enemy kind), every bond at its top tier, both 联防 fields, four leader
  * fields (one of them a Hidden Core), six matches (solo 标准 / 绝境, co-op 2 / 4, the boosted Hidden Core run, the 补位
  * match) and the normal-record stand-in battles.
@@ -1040,7 +1041,7 @@ const FAST_MATCHES = new Set(['solo-FUNNY-1', 'solo-HARD-1', 'coop2-NORMAL-3', '
 const FAST_FIELDS = new Set(['boss-boss_1-pair', 'boss-boss_4-solo', 'boss-boss_7-pair', 'hidden-boss_9-pair', 'unite-1', 'unite-2']);
 export function isFast(sc) {
   if (sc.family === 'matches') return FAST_MATCHES.has(sc.id);
-  if (sc.family === 'standins') return sc.pass === 0; // the normal records (the elites with GOLDEN_FULL)
+  if (sc.family === 'standins') return sc.pass === 0; // the normal records (the elites only in the whole corpus)
   if (sc.family === 'fields') return FAST_FIELDS.has(sc.id);
   if (sc.family === 'bonds') return sc.id.endsWith('-high');
   return sc.pass === 0;

@@ -30,21 +30,23 @@ renumbered by first appearance, units are named by board uid or def id), board p
 within a tick (they are counted, not hashed) and wall-clock time. Damage / healing sums are rounded to integers and HP
 to 2 decimals.
 
-`npm test` runs the fast subset (the scenarios marked `"fast": true`: every chess record with its default loadout,
+`npm test` runs the whole corpus (the CI test job runs it on Ubuntu and Windows, Node 22 and 24). The fast subset is
+the scenarios marked `"fast": true`: every chess record with its default loadout,
 every stage and every non-leader enemy kind, every bond at its top tier, six fields, seven matches, the five stand-in
-battles of the normal records, the first 自选 battle of the operator kits and of the prototypes — 62 of the 151). `GOLDEN_FULL=1` checks everything.
+battles of the normal records, the first 自选 battle of the operator kits and of the prototypes — 62 of the 151;
+`GOLDEN_FAST=1 node --test test/golden.test.js` runs only those.
 
 ## Workflow
 
 ```sh
-GOLDEN_FULL=1 node --test test/golden.test.js   # the whole corpus (≈ 20 s with 4 worker threads)
-node --test test/golden.test.js                 # the fast subset
+node --test test/golden.test.js                 # the whole corpus (≈ 20 s with 4 worker threads)
+GOLDEN_FAST=1 node --test test/golden.test.js   # the fast subset (a quick local loop)
 npm run golden                                  # the same comparison from the tool (all families, a short report)
 npm run golden:update                           # recompute and rewrite test/golden/*.json
 node tools/golden.mjs --twice                   # determinism: the corpus twice in one process, the second pass reversed
 ```
 
-- **A refactor commit must never change these files.** Run `GOLDEN_FULL=1 node --test test/golden.test.js` before
+- **A refactor commit must never change these files.** Run `node --test test/golden.test.js` before
   committing it. If a digest moves, the refactor changed behaviour: find out why (the first differing value of `snaps`
   says when two runs parted, in 10-game-second steps) instead of updating the files.
 - **An intended gameplay change** (a fix, new content, a data rebuild): run `npm run golden:update` and commit the

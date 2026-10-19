@@ -26,7 +26,7 @@ node --test test/content/op_siege.test.js                        # 一个文件
 node --test --test-name-pattern="S3" test/content/op_siege.test.js  # 文件里的部分用例
 npm test                                                         # 全部（需要浏览器 / 素材的用例自动跳过；不带文件的 node --test 还会跑 test/ 下的辅助模块和夹具）
 npm run golden                                                   # 黄金结果：整套固定种子的战斗和对局
-GOLDEN_FULL=1 node --test test/golden.test.js                    # 同上，node:test 形式
+GOLDEN_FAST=1 node --test test/golden.test.js                    # 只跑快速子集（默认检查整套，≈ 20 s）
 npm run golden:update                                            # 有意改变玩法时重新生成
 npm run lint && npm run check:imports && npm run typecheck       # 代码检查、导入边界、类型
 ```
