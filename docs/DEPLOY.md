@@ -418,6 +418,7 @@ node tools/package.mjs --assets --out <目录>   # 素材包 Stronghold-Protocol
 - 用了改变玩法插件的房间，对局在单独的子进程里运行（每套内容组合一个，同一组合的房间共用）：开发机实测子进程启动约 0.2 秒，载入数据和对局代码后约占 117 MB 内存（RSS），每个的堆上限 768 MB，最多同时 4 个，空闲 10 分钟后自动结束。子进程卡死（10 秒没有心跳）、崩溃或内存用尽时，只结束这套组合的对局，房间回到大厅并提示原因，服务器和其他房间不受影响。
 - `SP_MATCH_HOST=worker` 改用 worker 线程（在服务器进程里运行，不另起 Node 进程）。**公网服务器不要用**：在 Node 22 上实测，worker 线程里一次性的超大分配用尽内存时，会让**整个服务器进程**退出（`FATAL ERROR: … Allocation failed`，退出码 134），原版房间也一起断开；子进程同样的情况只结束子进程。默认就是子进程（DESIGN §32.6）。
 - `http://localhost:3000/healthz` 的 `content.sets` 是当前在用的改变玩法内容组合数。
+- 同一个 `/healthz` 的 `process` 是**进程自身**的指标（监视长时运行的部署用）：`pid`、`rssMb` / `heapUsedMb` / `heapTotalMb` / `externalMb`（`process.memoryUsage()`，MiB，取整），以及 `eventLoop: { p50Ms, p99Ms, maxMs }` —— 服务端跑一场战斗（`SP_COMBAT=server` 的流式对局、`SP_VERIFY` 的复算、机器人演练）都在**同一条线程**上按 8 ms 时间片推进，事件循环延迟变大就是「卡顿」的量化信号。直方图从进程启动开始累计（`perf_hooks.monitorEventLoopDelay`，20 ms 分辨率），刚启动的几毫秒里还没有样本，`eventLoop` 字段那时不出现。
 - 按地址安装（[PLUGINS.md](PLUGINS.md) §17）只接受公网 https 的 443 端口，并且必须校验 zip 的 SHA-256；服务器下载后先检查再放入 `plugins/`，不执行包里的任何代码。内网、本机、链路本地和 `.local` 默认拒绝，重定向到这些地址或离开 https 也会拒绝。一次等待包含正文，不是每一跳重新计时。服主要放行某个主机，写在上面的 `allowDownloadHosts` 或 `SP_PLUGIN_DOWNLOAD_ALLOW` 里。
 - 有人反馈问题时，诊断信息里的 `content:` 一行写着房间用的内容（`MODDED cs=… plugins=…` 表示开了改变玩法的插件），问题模板也会问「是否开了插件」。插件房间的问题请先找插件作者，并尽量在原版里复现。
 
