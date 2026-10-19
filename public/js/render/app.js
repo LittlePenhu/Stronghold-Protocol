@@ -108,6 +108,9 @@
 // shown together, as in the battle (community report of 2026-10-06, item 51).
 // Lost WebGL context of the 3D board: the 2D board takes over at once and the 3D board is rebuilt on a fresh context
 // a moment later (up to 3 tries; a context lost again right away counts as a failure; `setBoardMode('2d')` stops it).
+// Lost WebGL context of the 2D board (the Pixi canvas): PIXI 7's ContextSystem asks the browser for a restore; this
+// view pauses its ticker until `webglcontextrestored` (a lost context makes every draw a no-op and the board freezes),
+// resumes it then and reports the state in stats() (`contextLost`, `contextLosses`).
 //
 // Board art: the real 卫戍协议 board textures of the local client are used when installed (render/boardArt.js, crops
 // from tools/crop-board-atlas.mjs); otherwise every material is procedural (same geometry, no network errors).
@@ -440,6 +443,33 @@ export async function createFieldView(host, options = {}) {
   const impostors = new ImpostorAtlas(app.renderer);
   setupCleanup.push(() => impostors.destroy());
   ctx.impostors = impostors;
+
+  // ---- WebGL context loss of the 2D board (DESIGN §9) ---------------------------------------------------------
+  // PIXI 7's ContextSystem already preventDefaults `webglcontextlost` and asks the browser (WEBGL_lose_context) for a
+  // restore; when it arrives its `contextChange` runner re-creates the renderer's GL objects and the textures are
+  // re-uploaded on the next render. What it does not do is stop this view's frame while the context is gone (every draw
+  // is a no-op and the board just freezes) or tell a diagnostic that it happened. So: pause the ticker on loss, resume
+  // it on restore, count the losses and expose them in stats(). The 3D board has its own recovery (onBoard3dLost: the
+  // 2D board takes over, a fresh canvas and context are built a moment later).
+  let contextLost = false;
+  let contextLosses = 0;
+  const onContextLost = () => {
+    contextLost = true;
+    contextLosses++;
+    try { app.ticker.stop(); } catch { /* already stopped */ }
+    console.warn('[render] WebGL context of the battlefield lost: paused until it is restored');
+  };
+  const onContextRestored = () => {
+    contextLost = false;
+    try { app.ticker.start(); } catch { /* already running */ }
+    console.info('[render] WebGL context of the battlefield restored');
+  };
+  canvas.addEventListener('webglcontextlost', onContextLost);
+  canvas.addEventListener('webglcontextrestored', onContextRestored);
+  setupCleanup.push(() => {
+    canvas.removeEventListener('webglcontextlost', onContextLost);
+    canvas.removeEventListener('webglcontextrestored', onContextRestored);
+  });
   tiles.setView(bandFor('prep'), camRect(), fieldRows('prep'));
   // the real board art of the local client (optional): wait briefly so the first frame already uses it; a late
   // arrival swaps the atlas in place
@@ -2310,6 +2340,7 @@ export async function createFieldView(host, options = {}) {
       return {
         fps: Math.round(fps * 10) / 10, frameMs: Math.round(frameMs * 100) / 100, cpuMs: Math.round(cpuMs * 100) / 100, renderMs: Math.round(renderMs * 100) / 100, mode, units: views.size, impostor: impInterval, impostorAtlas: { ...impostors.stats }, boardArt: !!tiles.atlas.art,
         board3d: board3d ? { on: true, ...board3d.stats(), losses: recover.count } : { on: false, error: board3dError, recovering: !!recover.timer, losses: recover.count },
+        contextLost, contextLosses,
         pen: penViews.size, penHidden, prepField: prepXf.kind === 'bossPrep' ? prepXf.side : null, lod: loadLevel, culled: culledCount,
         ...fx.counts, officialFx: ofx.stats(), spine: assets.spine?.stats ? assets.spine.stats() : null, renderT: interp.renderT, rate: interp.rate,
         buffered: interp.size, camera: cam.params(),
