@@ -29,8 +29,11 @@ test('roomRowActions: 只有同盟房间可进；加入看空位与开没开打�
 });
 
 test('lobby.js 的两条入口走 room.join / room.spectate，文案全走 t() 且 en.json 有英文', () => {
-  assert.match(SRC, /net\.request\('room\.join'/, '加入 = 与输密钥同一条 room.join');
-  assert.match(SRC, /net\.request\('room\.spectate'/, '观战 = 与输密钥同一条 room.spectate');
+  // 0.3.x 之后两条入口都收进 joinKnown(type, key)（它统一处理测试房间的 TEST_CONFIRM 二次确认），
+  // 所以断言落在「同一条 joinKnown → net.request(type)」而不是直接调 net.request。
+  assert.match(SRC, /joinKnown\('room\.join'/, '加入 = 与输密钥同一条 room.join');
+  assert.match(SRC, /joinKnown\('room\.spectate'/, '观战 = 与输密钥同一条 room.spectate');
+  assert.match(SRC, /net\.request\(type, \{ code: key \}\)/, 'joinKnown 就是 net.request —— 两条入口不会各写一套');
   for (const zh of ['在线同盟', '暂无在线房间', '对局中', '房主：{name}', '加入']) {
     assert.ok(SRC.includes(`t('${zh}'`), `源码里 t('${zh}')`);
     assert.equal(typeof EN[zh], 'string', `en.json: ${zh}`);
