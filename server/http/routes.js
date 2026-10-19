@@ -22,6 +22,7 @@ import { buildTag } from './buildTag.js';
 import { setSecurityHeaders, sendError, sendJson, splitUrl } from './common.js';
 import { clientAddress, isLocalIp } from '../net.js';
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 const MAX_URL_LENGTH = 4096;
 
@@ -148,11 +149,50 @@ function resetRateLimited(ip, nowMs = Date.now()) {
 const LOOPBACK_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', '::ffff:0:127.0.0.1']);
 const isLoopback = (ip) => LOOPBACK_IPS.has(String(ip || ''));
 
-/** 服主接口的闸：没配 SP_ADMIN_TOKEN 就当作不存在；配了还必须是回环来源 + 正确 token。 */
-function adminAllowed(req, trustProxy) {
+/**
+ * 宿主机在容器里的样子：默认网关。
+ *
+ * 玩家从公网进来是 frpc 容器转发的，容器看到的来源是 **frpc 的容器 IP**；而服主在宿主机上
+ * `curl 127.0.0.1:3000` 时，经过 docker 的端口 NAT，容器看到的来源是**网桥网关**（172.x.0.1）。
+ * 所以「只在回环上」这条判断在容器里会永远不成立 —— 必须把宿主机网关也算进「本机」。
+ * frpc 的容器 IP 与网关不同，公网流量因此仍然进不来。
+ * @returns {string | null} the gateway address, or null (not Linux / unreadable)
+ */
+let gatewayCache;
+function hostGateway() {
+  if (gatewayCache !== undefined) return gatewayCache;
+  gatewayCache = null;
+  try {
+    const text = readFileSync('/proc/net/route', 'utf8');
+    for (const line of text.split('\n').slice(1)) {
+      const f = line.trim().split(/\s+/);
+      if (f.length > 2 && f[1] === '00000000' && /^[0-9a-fA-F]{8}$/.test(f[2])) {
+        const bytes = f[2].match(/../g).reverse().map((b) => parseInt(b, 16));
+        gatewayCache = bytes.join('.');
+        break;
+      }
+    }
+  } catch { /* 不是 Linux，或 /proc 不可读：只认回环 */ }
+  return gatewayCache;
+}
+
+/** 去掉 IPv4-mapped 前缀，好和网关地址直接比。 */
+const bareIp = (ip) => String(ip || '').replace(/^::ffff:/, '');
+
+/**
+ * 服主接口的闸：没配 SP_ADMIN_TOKEN 就当作不存在；配了还要**来源是本机**（回环或宿主机网关）
+ * 且 token 正确。
+ *
+ * 来源只认**原始连接地址**（`req.socket.remoteAddress`），不看 `X-Forwarded-For` —— 公网流量由
+ * frpc 转发，来源是私网地址，`clientAddress` 的 trustProxy 规则会把转发的头当真，那样任何人
+ * 都能伪造成 127.0.0.1。token 仍是唯一真正的凭据，这层只是别把门开在错误的地方。
+ */
+export function isAdminRequest(req) {
   const token = process.env.SP_ADMIN_TOKEN;
   if (!token) return false;
-  if (!isLoopback(clientAddress(req, trustProxy).ip)) return false;
+  const peer = bareIp(req.socket?.remoteAddress);
+  const gw = hostGateway();
+  if (!isLoopback(peer) && !(gw && peer === gw)) return false;
   const got = String(req.headers['x-admin-token'] || '');
   const a = Buffer.from(got);
   const b = Buffer.from(String(token));
@@ -215,7 +255,7 @@ async function handleAccountRoute(req, res, parts, health, { trustProxy, log }) 
  * 玩家在游戏里申请后拿到一个 8 位重置码，报给服主；服主 approve 之后玩家才能用这个码设新密码。
  */
 async function handleAdminRoute(req, res, parts, health, { trustProxy, log }) {
-  if (!adminAllowed(req, trustProxy)) { sendJson(req, res, 404, { error: 'NOT_FOUND' }); return; }
+  if (!isAdminRequest(req)) { sendJson(req, res, 404, { error: 'NOT_FOUND' }); return; }
   const accounts = health.accounts;
   if (!accounts) { sendJson(req, res, 503, { error: 'DISABLED' }); return; }
   if (req.method === 'GET' && parts.rawPath === '/admin/resets') {

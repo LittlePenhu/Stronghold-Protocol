@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { openAccounts, RESET_TTL_MS } from '../server/accounts.js';
 import { startServer } from '../server/index.js';
+import { isAdminRequest } from '../server/http/routes.js';
 import { ERR } from '../shared/constants.js';
 
 let seq = 0;
@@ -198,5 +199,31 @@ describe('密码重置（HTTP /account/* 与 /admin/*）', () => {
 
     res = await fetch(`${base}/account/nope`, { method: 'POST' });
     assert.equal(res.status, 404);
+  });
+});
+
+describe('服主接口的来源闸（isAdminRequest）', () => {
+  const req = (peer, headers) => ({ socket: { remoteAddress: peer }, headers });
+
+  test('公网来源伪造 X-Forwarded-For 不算本机', () => {
+    const prev = process.env.SP_ADMIN_TOKEN;
+    process.env.SP_ADMIN_TOKEN = 'token-abcdef';
+    try {
+      // frpc 转进来的流量：来源是私网容器地址，头里写什么都不能信
+      assert.equal(isAdminRequest(req('172.18.0.7', { 'x-forwarded-for': '127.0.0.1', 'x-admin-token': 'token-abcdef' })), false);
+      assert.equal(isAdminRequest(req('203.0.113.9', { 'x-admin-token': 'token-abcdef' })), false);
+      // 真回环 + 对 token 才放行（含 IPv4-mapped 写法）
+      assert.equal(isAdminRequest(req('127.0.0.1', { 'x-admin-token': 'token-abcdef' })), true);
+      assert.equal(isAdminRequest(req('::ffff:127.0.0.1', { 'x-admin-token': 'token-abcdef' })), true);
+      // token 不对 / 没带
+      assert.equal(isAdminRequest(req('127.0.0.1', { 'x-admin-token': 'wrong' })), false);
+      assert.equal(isAdminRequest(req('127.0.0.1', {})), false);
+      // 没配 token ⇒ 这条路不存在
+      delete process.env.SP_ADMIN_TOKEN;
+      assert.equal(isAdminRequest(req('127.0.0.1', { 'x-admin-token': 'token-abcdef' })), false);
+    } finally {
+      if (prev === undefined) delete process.env.SP_ADMIN_TOKEN;
+      else process.env.SP_ADMIN_TOKEN = prev;
+    }
   });
 });
