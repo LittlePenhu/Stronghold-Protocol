@@ -9,7 +9,9 @@
 //     hash `content.vanilla`, the modded content sets in use `content.sets` and — only when there are some — how many
 //     unofficial plugins the server has, `content.plugins` (the title screen's count before any hello) — DESIGN §32 —,
 //     sockets, sessions,
-//     rooms, matches), never cached; `?traffic=1` adds the traffic counters (traffic.js: bytes by category since the
+//     rooms, matches and the process figures — pid, RSS / heap / external memory and the event-loop delay histogram
+//     (processMetrics.js: a server-run field, a verification replay and a bot's rehearsal all step on this thread) —),
+//     never cached; `?traffic=1` adds the traffic counters (traffic.js: bytes by category since the
 //     start, WebSocket wire and payload bytes) for a loopback or private-network client only — the maintainer's
 //     decision of 2026-10-12: the figures are the host's, so any other client, also one a tunnel or proxy on this
 //     machine forwards, gets the plain report (net.js clientAddress, honouring TRUST_PROXY like the WebSocket limits);
@@ -19,6 +21,7 @@
 
 import { PROTOCOL_VERSION, APP_VERSION } from '../../shared/constants.js';
 import { buildTag } from './buildTag.js';
+import { processMetrics } from './processMetrics.js';
 import { setSecurityHeaders, sendError, sendJson, splitUrl } from './common.js';
 import { clientAddress, isLocalIp } from '../net.js';
 import crypto from 'node:crypto';
@@ -61,7 +64,7 @@ export function healthReport({ startedAt, network, registry, lobby, content = nu
     // hold now (P1c, §32.6 — a room's cosmetic plugins leave its cs the vanilla one, §32.3); how many unofficial plugins
     // it has, when it has some (a page's title screen says so; P1a)
     ...(content ? { content: { vanilla: content.cs, sets: contentSets(lobby), ...pluginCount(lobby) } } : {}),
-    sockets: network.connectionCount, sessions: registry.size, ...lobby.stats(),
+    sockets: network.connectionCount, sessions: registry.size, process: processMetrics(), ...lobby.stats(),
   };
   if (trusted && Object.keys(trusted).length) report.plugins = trusted;
   if (withTraffic && traffic) report.traffic = traffic.snapshot();
