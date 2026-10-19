@@ -64,6 +64,26 @@ const sha256 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex'
 export const newToken = () => crypto.randomBytes(16).toString('hex');
 const newAccountId = () => `a_${crypto.randomBytes(8).toString('hex')}`;
 
+/** 密码重置（服主批准制）：码长与有效期。 */
+export const RESET_CODE_LEN = 8;
+export const RESET_TTL_MS = 7 * 24 * 3600 * 1000;
+/** 人读码的字母表：去掉 0/O/1/I 这些抄错就再也对不上的字符。 */
+const RESET_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+/** 一次性重置码（玩家报给服主、批准后填回游戏）。 */
+export function newResetCode() {
+  const bytes = crypto.randomBytes(RESET_CODE_LEN);
+  let out = '';
+  for (let i = 0; i < RESET_CODE_LEN; i++) out += RESET_ALPHABET[bytes[i] % RESET_ALPHABET.length];
+  return out;
+}
+
+/** 重置码的规范化形式（玩家会打空格、小写、连字符）。 */
+export const normalizeResetCode = (code) => String(code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+/** 凭证的存储形式（`sha256(token)`）—— 会话要记住"我用的是哪张凭证"时用它比对。 */
+export const tokenHash = (token) => sha256(token);
+
 /**
  * 用户名的规范化形式：用于唯一性判定。
  * 做 NFKC + 去首尾空白 + 折叠内部连续空白 + 小写 —— 挡掉 "喷壶" 与 "喷 壶" / "PenHu" 与 "penhu"
@@ -119,6 +139,10 @@ export const ERR = Object.freeze({
   NO_ACCOUNT: 'NO_ACCOUNT',
   BAD_CREDENTIALS: 'BAD_CREDENTIALS',
   NO_PASSWORD: 'NO_PASSWORD',
+  // 密码重置：申请了但服主还没批 / 码对不上 / 过了有效期（重新申请）
+  RESET_PENDING: 'RESET_PENDING',
+  RESET_BAD_CODE: 'RESET_BAD_CODE',
+  RESET_EXPIRED: 'RESET_EXPIRED',
   STORE: 'STORE',
 });
 
@@ -284,10 +308,15 @@ export class Accounts {
     return rec;
   }
 
-  /** 改名。accountId 不变 ⇒ 历史成绩不会分裂。 */
-  rename(accountId, newName) {
+  /**
+   * 改名。accountId 不变 ⇒ 历史成绩不会分裂。
+   * 账号有密码时要带上密码（与改密码同一条闸；名字在榜上是公开的，改名的风险是冒充别人）。
+   * @param {string} accountId @param {string} newName @param {{ password?: string|null }} [opts]
+   */
+  rename(accountId, newName, { password = null } = {}) {
     const rec = this.byId.get(accountId);
     if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
+    if (rec.password && !verifyPassword(password, rec.password)) throw new AccountError(ERR.BAD_CREDENTIALS);
     const bad = nameProblem(newName);
     if (bad) throw new AccountError(ERR.BAD_NAME, bad);
     const nextLower = normalizeName(newName);
@@ -303,10 +332,20 @@ export class Accounts {
     return rec;
   }
 
-  /** 设/改密码（也可以用来清掉密码传 null）。 */
-  setPassword(accountId, password) {
+  /**
+   * 设/改密码（也可以用来清掉密码传 null）。
+   *
+   * **已经有密码的账号，改密码必须先给旧密码。** 设备凭证就是这台浏览器的登录态 ——
+   * 共用电脑、导出的备份、被插件读走的 localStorage 都可能让别人拿到它；没有旧密码这道闸，
+   * 拿到凭证的人可以直接改密码，把主人关在门外。
+   * @param {string} accountId
+   * @param {string|null} password 新密码（null = 清掉）
+   * @param {{ oldPassword?: string|null }} [opts]
+   */
+  setPassword(accountId, password, { oldPassword = null } = {}) {
     const rec = this.byId.get(accountId);
     if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
+    if (rec.password && !verifyPassword(oldPassword, rec.password)) throw new AccountError(ERR.BAD_CREDENTIALS);
     if (password != null && (typeof password !== 'string' || password.length < PASSWORD_MIN || password.length > PASSWORD_MAX)) {
       throw new AccountError(ERR.BAD_PASSWORD);
     }
@@ -343,7 +382,16 @@ export class Accounts {
   /** 撤销一个凭证（凭证泄露，或玩家主动「退出这台设备」）。@returns {boolean} 是否确实撤销了 */
   revokeToken(token) {
     if (typeof token !== 'string' || !token) return false;
-    const hash = sha256(token);
+    return this.revokeTokenHash(sha256(token));
+  }
+
+  /**
+   * 按**哈希**撤销一张凭证。会话手里记的是 `sha256(token)`（明文只在客户端），
+   * 所以「退出这台设备」走的是这条。
+   * @param {string} hash @returns {boolean} 是否确实撤销了
+   */
+  revokeTokenHash(hash) {
+    if (typeof hash !== 'string' || !hash) return false;
     const id = this.byToken.get(hash);
     if (!id) return false;
     const rec = this.byId.get(id);
@@ -361,16 +409,123 @@ export class Accounts {
    * 撤销账号的**全部**凭证（密码本身不变）。
    * 用途：怀疑串号、或玩家说"我的号被别人上了"时的应急处理 —— 撤完之后只有密码能进来。
    * 账号记录本身保留，历史成绩不受影响。
+   *
+   * `exceptHash`：保留这一张（「踢掉其他设备」= 保留当前会话的那张）。不传 = 全撤。
+   * @param {string} accountId @param {{ exceptHash?: string|null }} [opts]
    */
-  revokeAllTokens(accountId) {
+  revokeAllTokens(accountId, { exceptHash = null } = {}) {
     const rec = this.byId.get(accountId);
     if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
-    for (const tk of rec.tokens) this.byToken.delete(tk.hash);
-    rec.tokens = [];
+    const kept = [];
+    for (const tk of rec.tokens) {
+      if (exceptHash && tk.hash === exceptHash) { kept.push(tk); continue; }
+      this.byToken.delete(tk.hash);
+    }
+    rec.tokens = kept;
     rec.updatedAt = now();
     this.dirty = true;
     this.save();
     return rec;
+  }
+
+  // ── 账号面板 / 密码重置 ────────────────────────────────────────────────────────
+
+  /** 当前账号的对外状态（账号面板用；不含任何哈希）。 */
+  info(accountId) {
+    const rec = this.byId.get(accountId);
+    if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
+    const r = rec.reset && rec.reset.expiresAt > now() ? rec.reset : null;
+    return {
+      id: rec.id,
+      name: rec.name,
+      hasPassword: !!rec.password,
+      devices: Array.isArray(rec.tokens) ? rec.tokens.length : 0,
+      createdAt: rec.createdAt || null,
+      resetPending: !!r,
+      resetApproved: !!(r && r.approvedAt),
+    };
+  }
+
+  /**
+   * 玩家申请重置密码。**这一步不验证身份** —— 谁都能为任何代号申请，真正的闸门是服主批准；
+   * 库里只存 `sha256(code)`，码本身只回给申请者一次（服主靠玩家报码来认人）。
+   * 每次申请覆盖上一次：同一个账号不会同时有两个有效申请，旧码立刻失效。
+   * @param {string} name
+   * @returns {{ code: string, expiresAt: number }}
+   */
+  requestReset(name) {
+    const rec = this.byName_(name);
+    if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
+    const code = newResetCode();
+    const at = now();
+    rec.reset = { hash: sha256(normalizeResetCode(code)), at, expiresAt: at + RESET_TTL_MS, approvedAt: null };
+    rec.updatedAt = at;
+    this.dirty = true;
+    this.save();
+    return { code, expiresAt: rec.reset.expiresAt };
+  }
+
+  /** 待处理的申请（服主看的列表；只有名字与时间，码只在玩家手里）。 */
+  pendingResets() {
+    const out = [];
+    for (const rec of this.byId.values()) {
+      const r = rec.reset;
+      if (!r) continue;
+      out.push({ name: rec.name, requestedAt: r.at, expiresAt: r.expiresAt, approved: !!r.approvedAt, expired: r.expiresAt <= now() });
+    }
+    return out.sort((a, b) => (a.requestedAt || 0) - (b.requestedAt || 0));
+  }
+
+  /**
+   * 服主批准。`code` 与 `name` 二选一：玩家报了码就按码找，只报了代号就由服主自己确认是谁。
+   * @param {{ code?: string|null, name?: string|null }} [input]
+   * @returns {{ name: string }}
+   */
+  approveReset({ code = null, name = null } = {}) {
+    let rec = null;
+    if (code) {
+      const h = sha256(normalizeResetCode(code));
+      for (const r of this.byId.values()) if (r.reset?.hash === h) { rec = r; break; }
+    } else if (name) {
+      rec = this.byName_(name);
+    }
+    if (!rec || !rec.reset) throw new AccountError(ERR.RESET_BAD_CODE);
+    if (rec.reset.expiresAt <= now()) throw new AccountError(ERR.RESET_EXPIRED);
+    rec.reset.approvedAt = now();
+    rec.updatedAt = rec.reset.approvedAt;
+    this.dirty = true;
+    this.save();
+    return { name: rec.name };
+  }
+
+  /**
+   * 完成重置：码 + 新密码 → 设密码、**撤销全部旧设备凭证**、签发一张新凭证。
+   * 全撤是刻意的：重置的典型场景就是「号可能被别人上了」，留着旧凭证等于留着后门。
+   * @param {{ name: string, code: string, password: string }} input
+   * @returns {{ account: any, token: string }}
+   */
+  completeReset({ name, code, password } = {}) {
+    const rec = this.byName_(name);
+    if (!rec) throw new AccountError(ERR.NO_ACCOUNT);
+    const r = rec.reset;
+    if (!r) throw new AccountError(ERR.RESET_BAD_CODE);
+    if (r.expiresAt <= now()) throw new AccountError(ERR.RESET_EXPIRED);
+    if (!r.approvedAt) throw new AccountError(ERR.RESET_PENDING);
+    if (!safeEqual(sha256(normalizeResetCode(code)), r.hash)) throw new AccountError(ERR.RESET_BAD_CODE);
+    if (typeof password !== 'string' || password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+      throw new AccountError(ERR.BAD_PASSWORD);
+    }
+    rec.password = hashPassword(password);
+    for (const tk of rec.tokens) this.byToken.delete(tk.hash);
+    rec.tokens = [];
+    delete rec.reset;
+    rec.updatedAt = now();
+    const token = newToken();
+    rec.tokens.push({ hash: sha256(token), createdAt: rec.updatedAt });
+    this.byToken.set(sha256(token), rec.id);
+    this.dirty = true;
+    this.save();
+    return { account: rec, token };
   }
 
   /**

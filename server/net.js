@@ -44,6 +44,7 @@ import { randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { C2S, validateC2S } from '../shared/protocol.js';
 import { ERR, ERR_TEXT, NAME_MAX_LEN, PROTOCOL_VERSION } from '../shared/constants.js';
+import { tokenHash } from './accounts.js';
 
 /** Tunables (all overridable through the Network / SessionRegistry constructors). */
 export const NET_DEFAULTS = Object.freeze({
@@ -88,6 +89,11 @@ const ACCOUNT_ERR = Object.freeze({
   BAD_CREDENTIALS: ERR.BAD_CREDENTIALS,
   BAD_PASSWORD: ERR.BAD_PASSWORD,
   NO_PASSWORD: ERR.NO_PASSWORD,
+  // 账号面板 / 密码重置里**可以**告诉玩家的：都是「他自己的账号」的状态，不含任何文件信息
+  NO_ACCOUNT: ERR.NO_ACCOUNT,
+  RESET_PENDING: ERR.RESET_PENDING,
+  RESET_BAD_CODE: ERR.RESET_BAD_CODE,
+  RESET_EXPIRED: ERR.RESET_EXPIRED,
 });
 
 const WS_OPEN = 1;
@@ -112,6 +118,12 @@ export class Session {
      * directly: that is what makes 「排名归到谁头上」 unforgeable (session.accountId → leaderboard rows).
      */
     this.accountId = accountId;
+    /**
+     * @type {string | null} `sha256` of the device credential this session authenticated with — never the plaintext
+     * (the client keeps that). 「退出这台设备」/「踢掉其他设备」 need it to tell this session's credential apart
+     * from the account's other ones.
+     */
+    this.accountTokenHash = null;
     /** @type {string} secret 128-bit hex reconnect token (only ever sent to its owner) */
     this.token = token;
     /** @type {string} sanitized nickname */
@@ -646,8 +658,12 @@ export class Network {
     }
     if (msg.t === 'hello') { this.onHelloMsg(conn, msg, now); return; }
     if (!conn.session) { this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'hello required')); return; }
-    // 账号消息在 net 层处理（账号属于会话身份，不属于房间）—— 见 onSetPasswordMsg
+    // 账号消息在 net 层处理（账号属于会话身份，不属于房间）—— 见 onSetPasswordMsg 与下面的账号面板消息
     if (msg.t === 'account.setPassword') { this.onSetPasswordMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.info') { this.onAccountInfoMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.logout') { this.onAccountLogoutMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.revokeOthers') { this.onAccountRevokeOthersMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.rename') { this.onAccountRenameMsg(conn, msg, rid); return; }
     if (HEAVY_TYPES.has(msg.t) && !conn.heavy.take(now)) { this.reply(conn, errorMsg(ERR.RATE, rid, `${msg.t} too often`)); return; }
 
     let res;
@@ -747,6 +763,13 @@ export class Network {
     session.addr = conn.ip;
     session.limitKey = conn.key;
 
+    // 这次握手用的是哪张设备凭证：服务端新签发的，或客户端自己带来的那张。会话只留哈希（明文在客户端）。
+    // 「退出这台设备」= 撤销这一张；「踢掉其他设备」= 撤掉其余的，都靠它区分。
+    if (this.accounts && session.accountId) {
+      const used = issuedToken || (typeof msg.accountToken === 'string' && msg.accountToken ? msg.accountToken : null);
+      if (used) session.accountTokenHash = tokenHash(used);
+    }
+
     let extra = null;
     try { extra = this.handler.welcomeInfo?.() ?? null; } catch (e) { this.log.error('[net] welcomeInfo crashed', e); }
     const welcome = { ...(extra && typeof extra === 'object' ? extra : null), t: 'welcome', playerId: session.playerId, token: session.token, name: session.name, serverNow: now, version: PROTOCOL_VERSION, resumed };
@@ -791,30 +814,121 @@ export class Network {
   }
 
   /**
+   * 账号消息的公共门槛：有账号库、有会话、会话已经落在某个账号上。
+   * 不满足时**已经回过错误帧**，返回 null，调用方直接 return。
+   * @param {Connection} conn @param {unknown} rid
+   * @returns {any | null} the session
+   */
+  accountSessionFor(conn, rid) {
+    const session = conn.session;
+    if (!this.accounts || !session || !session.accountId) {
+      // 服务端没开账号系统，或这个会话没有账号（无账号会话没有「自己的账号」可言）
+      this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'no account on this session'));
+      return null;
+    }
+    return session;
+  }
+
+  /**
+   * 账号消息的错误回复。**只有 ACCOUNT_ERR 里列出的码**才把 detail 回给客户端；
+   * 其余（STORE 等）可能带文件路径，一律折成 INTERNAL 且不带 detail。
+   */
+  replyAccountError(conn, e, rid) {
+    const code = ACCOUNT_ERR[e?.code];
+    if (code) { this.reply(conn, errorMsg(code, rid, e.code)); return; }
+    this.log.error('[net] account store error', e);
+    this.reply(conn, errorMsg(ERR.INTERNAL, rid));
+  }
+
+  /** `ok`（合法的 rid 才带）+ 账号快照 —— 客户端 `net.request` 拿到它之后刷新账号面板。 */
+  replyAccountOk(conn, rid, account) {
+    const ok = { t: 'ok' };
+    if (validRid(rid)) ok.rid = rid;
+    if (account) ok.account = account;
+    this.reply(conn, ok);
+  }
+
+  /**
    * `account.setPassword` —— 给**当前会话**的账号设置 / 更换密码。
    *
    * 身份只看 `session.accountId`（服务端从凭证 / 密码裁定出来的），消息里没有、也不接受任何名字或 id ——
    * 所以这条路永远改的是「你自己」的账号，不存在「改别人的密码」。密码只是备用钥匙：
    * 设 / 改密码**不动任何设备凭证**，老设备不该因为新设备设了密码就被踢下线。
-   * @param {Connection} conn @param {{ password: string }} msg @param {unknown} rid
+   * 账号**已经有密码**时必须带 `oldPassword`（见 accounts.setPassword：没有它，拿到设备凭证的人能改掉密码把主人锁在门外）。
+   * @param {Connection} conn @param {{ password: string, oldPassword?: string }} msg @param {unknown} rid
    */
   onSetPasswordMsg(conn, msg, rid) {
-    const session = conn.session;
-    if (!this.accounts || !session || !session.accountId) {
-      // 服务端没开账号系统，或这个会话没有账号（无账号会话没有「自己的密码」可言）
-      this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'no account on this session'));
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      this.accounts.setPassword(session.accountId, msg.password, { oldPassword: msg.oldPassword ?? null });
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
+  }
+
+  /** `account.info` —— 账号面板的初始状态（代号 / 设备数 / 有没有密码 / 注册时间）。 */
+  onAccountInfoMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
+  }
+
+  /**
+   * `account.logout` —— 「退出这台设备」：撤销**当前会话**这张设备凭证。
+   * 会话本身不断线（他仍然是这个人，只是这张凭证作废了）；下次开浏览器得用密码或重置码回来。
+   * 客户端收到 `ok` 后要自己抹掉 localStorage 里的凭证（服务端已经把哈希删了）。
+   */
+  onAccountLogoutMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    if (!session.accountTokenHash) {
+      this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'no device credential on this session'));
       return;
     }
     try {
-      this.accounts.setPassword(session.accountId, msg.password);
+      this.accounts.revokeTokenHash(session.accountTokenHash);
+      session.accountTokenHash = null;
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
     } catch (e) {
-      const code = ACCOUNT_ERR[e?.code];
-      if (code) { this.reply(conn, errorMsg(code, rid, e.code)); return; }
-      this.log.error('[net] account store error', e);  // 不回 detail：里面可能有文件路径
-      this.reply(conn, errorMsg(ERR.INTERNAL, rid));
-      return;
+      this.replyAccountError(conn, e, rid);
     }
-    if (validRid(rid)) this.reply(conn, { t: 'ok', rid });
+  }
+
+  /**
+   * `account.revokeOthers` —— 怀疑号被别人上了：撤掉**除当前这台以外**的全部设备凭证。
+   * 密码不变；撤销之后别人手里的旧凭证立刻失效，只能靠密码或重置码重新进来。
+   */
+  onAccountRevokeOthersMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      this.accounts.revokeAllTokens(session.accountId, { exceptHash: session.accountTokenHash });
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
+  }
+
+  /**
+   * `account.rename` —— 改代号。`accountId` 不变 ⇒ 历史成绩不会分裂。
+   * 账号有密码时要带 `password`（名字在榜上是公开的，改名的风险是冒充别人）。
+   */
+  onAccountRenameMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      const rec = this.accounts.rename(session.accountId, msg.name, { password: msg.password ?? null });
+      session.name = rec.name;
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
   }
 
   /** The session moved to a new socket: unbind and close the old one without firing a disconnect. */

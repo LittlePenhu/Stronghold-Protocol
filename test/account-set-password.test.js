@@ -103,8 +103,12 @@ describe('account.setPassword：给当前账号设置 / 更换密码', () => {
 
     send(first, { t: 'account.setPassword', password: 'first-pass', rid: 2 });
     assert.equal(first.last().t, 'ok');
-    send(first, { t: 'account.setPassword', password: 'second-pass', rid: 3 });
-    assert.equal(first.last().t, 'ok', '改密码也走同一条消息');
+    // 已经有密码之后，改密码**必须带旧密码** —— 否则拿到设备凭证的人能把主人锁在门外
+    send(first, { t: 'account.setPassword', password: 'hijack-pass', rid: 21 });
+    assert.equal(first.last().t, 'error');
+    assert.equal(first.last().code, ERR.BAD_CREDENTIALS, '不带旧密码的改动被拒绝');
+    send(first, { t: 'account.setPassword', password: 'second-pass', oldPassword: 'first-pass', rid: 22 });
+    assert.equal(first.last().t, 'ok', '带旧密码就走同一条消息');
 
     // 旧凭证没有被撤销
     const resumed = fakeConn();

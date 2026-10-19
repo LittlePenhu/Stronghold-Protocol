@@ -22,6 +22,7 @@
 import { ResumeMatchButton } from '../ui/resumeMatch.js';
 import { AssetDownloadButton } from '../ui/assetDownload.js';
 import { AssetImportButton } from '../ui/assetImport.js';
+import { AccountPanel, ForgotPasswordPanel } from '../ui/account.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
 import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
@@ -185,6 +186,10 @@ export function TitleScreen() {
   // 已发出 hello、正在等结果。**失败之前不让玩家进大厅** —— 不然他会在里面看到「未连接」却不知道为什么。
   const [pending, setPending] = useState(false);
   const errAtStart = useRef(null);
+  // 账号面板（ui/account.js）：状态 / 改密码 / 改代号 / 退出这台设备 / 踢掉其他设备
+  const [accountOpen, setAccountOpen] = useState(false);
+  // 「忘记密码」：申请 → 报码给服主 → 批准后设新密码（ui/account.js ForgotPasswordPanel）
+  const [forgotOpen, setForgotOpen] = useState(false);
   // the list of the server's plugins once loaded (ui/pluginPanel.js — a component in state: set through an updater)
   const [Installed, setInstalled] = useState(null);
   const openPlugins = () => {
@@ -348,6 +353,10 @@ export function TitleScreen() {
           ${noPassword ? t('开始') : passwordMode ? t('用密码登录') : t('开始')}<//>
         ${!passwordMode && valid ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAskPassword(true)}>
           ${t('换设备了？用密码登录')}</button>` : null}
+        ${(passwordMode && !noPassword) || noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setForgotOpen(true)}>
+          ${noPassword ? t('忘记密码？申请重置') : t('忘记密码？')}</button>` : null}
+        ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAccountOpen(true)}>
+          ${t('账号')}</button>` : null}
         ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setPwSetOpen(!pwSetOpen)}>
           ${net.accountHasPassword ? t('修改密码') : t('设置密码')}</button>` : null}
         ${pwSetOpen && hasAccount && !passwordMode ? html`<div class="title-pwset">
@@ -376,6 +385,14 @@ export function TitleScreen() {
     </main>
 
     <${SettingsModal} open=${settingsOpen} onClose=${() => setSettingsOpen(false)} />
+    <${AccountPanel} open=${accountOpen} onClose=${() => setAccountOpen(false)} onRenamed=${(n) => setName(n)} />
+    <${ForgotPasswordPanel} open=${forgotOpen} initialName=${name} onClose=${() => setForgotOpen(false)}
+      onDone=${(n) => {
+        // 重置成功后客户端已经拿到新凭证（identity.saveAccountToken），这里只把界面恢复成「可以正常开始」的样子
+        setName(n);
+        net.clearError?.();
+        errAtStart.current = null;
+      }} />
     ${Installed ? html`<${Installed} open=${true} onClose=${() => setInstalled(null)} />` : null}
 
     <footer class="title-foot">

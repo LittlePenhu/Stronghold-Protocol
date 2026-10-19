@@ -164,6 +164,11 @@ export const ERR = Object.freeze({
   // 「名字对的、密码也给了，但这个账号压根没设过密码」—— 单独一个码，否则前端只能显示
   // 「密码不正确」，没设过密码的人会一遍遍试错、永远进不去（详见 accounts.js 的 authenticate）。
   NO_PASSWORD: 'NO_PASSWORD',
+  // 账号面板与密码重置（服主批准制）
+  NO_ACCOUNT: 'NO_ACCOUNT',       // 代号没有对应的账号（申请重置时）
+  RESET_PENDING: 'RESET_PENDING', // 申请了，但服主还没批准
+  RESET_BAD_CODE: 'RESET_BAD_CODE',
+  RESET_EXPIRED: 'RESET_EXPIRED',
   // room.setPlugins (DESIGN §32): a plugin this server has not installed; one a room cannot switch on in this version
   // (not a cosmetic or content plugin it loads, not of the room's scope, or not allowed by the server owner's
   // plugins/config.json); a requirement missing or out of range, or a load-order cycle; two plugins in conflict; a set
@@ -208,6 +213,10 @@ export const ERR_TEXT = {
   BAD_CREDENTIALS: N_('密码不正确'),
   BAD_PASSWORD: N_('密码至少 6 位'),
   NO_PASSWORD: N_('这个代号没有设过密码 —— 输多少次都不对。请在当初注册的那个浏览器里打开（凭证只存在那里），或者换一个代号。'),
+  NO_ACCOUNT: N_('这个代号没有对应的账号。'),
+  RESET_PENDING: N_('重置申请还没被服主批准 —— 把重置码报给服主，等他确认。'),
+  RESET_BAD_CODE: N_('重置码不对（或者已经被新的申请覆盖了）。'),
+  RESET_EXPIRED: N_('重置码过期了，请重新申请。'),
   PLUGIN_UNKNOWN: N_('本服务器没有安装该插件'), PLUGIN_BLOCKED: N_('该插件不能在房间中启用'), PLUGIN_DEPENDENCY: N_('缺少该插件需要的其他插件'),
   PLUGIN_CONFLICT: N_('所选插件互相冲突'), PLUGIN_LIMIT: N_('所选插件的素材总量超出本服务器的上限'),
   PLUGIN_RULE_CONFLICT: N_('两个插件把同一个规则开关设成了不同的选项'),

@@ -21,6 +21,7 @@ import { PROTOCOL_VERSION, APP_VERSION } from '../../shared/constants.js';
 import { buildTag } from './buildTag.js';
 import { setSecurityHeaders, sendError, sendJson, splitUrl } from './common.js';
 import { clientAddress, isLocalIp } from '../net.js';
+import crypto from 'node:crypto';
 
 const MAX_URL_LENGTH = 4096;
 
@@ -84,6 +85,158 @@ export function leaderboardReport({ leaderboard }) {
   return { enabled: true, ...leaderboard.boards() };
 }
 
+// ---------------------------------------------------------------------------------------------------
+// 账号：密码重置（HTTP，两步）+ 服主批准（仅回环）
+// ---------------------------------------------------------------------------------------------------
+//
+// 为什么这两步不走 WebSocket：它们必须发生在 **hello 之前** —— 忘了密码又丢了设备凭证的人
+// 根本登不进来，没有任何会话可用。其余账号操作（改密码 / 改名 / 退出设备 / 踢掉其他设备）
+// 都在会话里，走 WS（server/net.js 的 account.*）。
+
+const MAX_JSON_BODY = 4096;
+
+/** 这些码可以回给浏览器；其余（STORE 等）折成 500，避免把文件路径之类的信息漏出去。 */
+const PUBLIC_ACCOUNT_ERRORS = new Set(['BAD_NAME', 'BAD_PASSWORD', 'NO_ACCOUNT', 'RESET_PENDING', 'RESET_BAD_CODE', 'RESET_EXPIRED']);
+const ACCOUNT_ERROR_STATUS = Object.freeze({
+  BAD_NAME: 400, BAD_PASSWORD: 400, NO_ACCOUNT: 404,
+  RESET_PENDING: 403, RESET_BAD_CODE: 403, RESET_EXPIRED: 410,
+});
+
+/** 读一个 JSON 对象请求体（上限 4 KB）。坏 JSON / 超长 / 非对象 → null。 */
+function readJsonBody(req, limit = MAX_JSON_BODY) {
+  return new Promise((resolve) => {
+    let size = 0;
+    let dead = false;
+    const chunks = [];
+    req.on('data', (c) => {
+      if (dead) return;
+      size += c.length;
+      if (size > limit) { dead = true; resolve(null); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (dead) return;
+      if (!chunks.length) { resolve(null); return; }
+      try {
+        const v = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        resolve(v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+      } catch { resolve(null); }
+    });
+    req.on('error', () => { if (!dead) { dead = true; resolve(null); } });
+  });
+}
+
+/**
+ * 重置申请的频率闸（进程内存）：同一来源 10 分钟最多 5 次。
+ * 防的不是猜码（8 位、32 个字符的字母表 ≈ 1.1e12），而是别让人把 accounts.json 当日志刷。
+ */
+const RESET_WINDOW_MS = 10 * 60 * 1000;
+const RESET_MAX_PER_WINDOW = 5;
+const resetHits = new Map();
+
+function resetRateLimited(ip, nowMs = Date.now()) {
+  const list = (resetHits.get(ip) || []).filter((t) => nowMs - t < RESET_WINDOW_MS);
+  if (list.length >= RESET_MAX_PER_WINDOW) { resetHits.set(ip, list); return true; }
+  list.push(nowMs);
+  resetHits.set(ip, list);
+  // 长跑进程里不留垃圾：来源表超过 5000 条时顺手清掉过期的
+  if (resetHits.size > 5000) for (const [k, v] of resetHits) if (!v.length || nowMs - v[v.length - 1] > RESET_WINDOW_MS) resetHits.delete(k);
+  return false;
+}
+
+/** 严格的本机判断 —— 只用回环，**不含**私网。frpc 容器（私网地址）转进来的公网流量不该被当成服主。 */
+const LOOPBACK_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', '::ffff:0:127.0.0.1']);
+const isLoopback = (ip) => LOOPBACK_IPS.has(String(ip || ''));
+
+/** 服主接口的闸：没配 SP_ADMIN_TOKEN 就当作不存在；配了还必须是回环来源 + 正确 token。 */
+function adminAllowed(req, trustProxy) {
+  const token = process.env.SP_ADMIN_TOKEN;
+  if (!token) return false;
+  if (!isLoopback(clientAddress(req, trustProxy).ip)) return false;
+  const got = String(req.headers['x-admin-token'] || '');
+  const a = Buffer.from(got);
+  const b = Buffer.from(String(token));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/** 把 AccountError 翻成 JSON 错误；不认识的码按 500 处理（并记日志，不回内部信息）。 */
+function sendAccountError(req, res, e, log) {
+  const code = typeof e?.code === 'string' && PUBLIC_ACCOUNT_ERRORS.has(e.code) ? e.code : null;
+  if (!code) {
+    log.error('[http] account route failed', e);
+    sendError(req, res, 500, '服务器内部错误 · Internal error');
+    return;
+  }
+  sendJson(req, res, ACCOUNT_ERROR_STATUS[code] || 400, { error: code });
+}
+
+/**
+ * `/account/reset-request` 与 `/account/reset-complete`。
+ * 两步都不需要会话；申请**不验证身份**（谁都能为任何代号申请），真正的闸是服主批准。
+ * `reset-compete` 成功后回一张新的设备凭证 —— 客户端存进 localStorage 再正常 hello 即可。
+ */
+async function handleAccountRoute(req, res, parts, health, { trustProxy, log }) {
+  const accounts = health.accounts;
+  if (!accounts) { sendJson(req, res, 404, { error: 'DISABLED' }); return; }
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    sendJson(req, res, 405, { error: 'METHOD' });
+    return;
+  }
+  if (parts.rawPath === '/account/reset-request') {
+    if (resetRateLimited(clientAddress(req, trustProxy).ip)) { sendJson(req, res, 429, { error: 'RATE' }); return; }
+    const body = await readJsonBody(req);
+    if (!body || typeof body.name !== 'string') { sendJson(req, res, 400, { error: 'BAD_MSG' }); return; }
+    try {
+      const r = accounts.requestReset(body.name);
+      sendJson(req, res, 200, { code: r.code, expiresAt: r.expiresAt });
+    } catch (e) { sendAccountError(req, res, e, log); }
+    return;
+  }
+  if (parts.rawPath === '/account/reset-complete') {
+    const body = await readJsonBody(req);
+    if (!body || typeof body.name !== 'string' || typeof body.code !== 'string' || typeof body.password !== 'string') {
+      sendJson(req, res, 400, { error: 'BAD_MSG' });
+      return;
+    }
+    try {
+      const r = accounts.completeReset({ name: body.name, code: body.code, password: body.password });
+      sendJson(req, res, 200, { name: r.account.name, token: r.token });
+    } catch (e) { sendAccountError(req, res, e, log); }
+    return;
+  }
+  sendJson(req, res, 404, { error: 'NOT_FOUND' });
+}
+
+/**
+ * 服主接口（只在回环 + SP_ADMIN_TOKEN 时存在）：
+ *   GET  /admin/resets            → { resets: [{ name, requestedAt, expiresAt, approved, expired }] }
+ *   POST /admin/resets/approve    → body { code } 或 { name } → { approved: true, name }
+ * 玩家在游戏里申请后拿到一个 8 位重置码，报给服主；服主 approve 之后玩家才能用这个码设新密码。
+ */
+async function handleAdminRoute(req, res, parts, health, { trustProxy, log }) {
+  if (!adminAllowed(req, trustProxy)) { sendJson(req, res, 404, { error: 'NOT_FOUND' }); return; }
+  const accounts = health.accounts;
+  if (!accounts) { sendJson(req, res, 503, { error: 'DISABLED' }); return; }
+  if (req.method === 'GET' && parts.rawPath === '/admin/resets') {
+    sendJson(req, res, 200, { resets: accounts.pendingResets() });
+    return;
+  }
+  if (req.method === 'POST' && parts.rawPath === '/admin/resets/approve') {
+    const body = await readJsonBody(req);
+    if (!body) { sendJson(req, res, 400, { error: 'BAD_MSG' }); return; }
+    try {
+      const r = accounts.approveReset({
+        code: typeof body.code === 'string' ? body.code : null,
+        name: typeof body.name === 'string' ? body.name : null,
+      });
+      sendJson(req, res, 200, { approved: true, name: r.name });
+    } catch (e) { sendAccountError(req, res, e, log); }
+    return;
+  }
+  sendJson(req, res, 404, { error: 'NOT_FOUND' });
+}
+
 /**
  * The request listener for `http.createServer`.
  * @param {{ serveStatic: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse,
@@ -96,6 +249,7 @@ export function leaderboardReport({ leaderboard }) {
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
 export function createRequestHandler({ serveStatic, health, log, trustProxy = 'auto', studio = null, csp = null, trustedRuntime = null }) {
+  const ctx = { trustProxy, log };
   async function handleRequest(req, res) {
     const url = req.url || '/';
     if (url.length > MAX_URL_LENGTH) { sendError(req, res, 414, '请求地址过长 · URI too long'); return; }
@@ -103,6 +257,11 @@ export function createRequestHandler({ serveStatic, health, log, trustProxy = 'a
     if (!parts) { sendError(req, res, 400, '请求地址无效 · Bad request'); return; }
     if (trustedRuntime && parts.rawPath.startsWith('/x/') && await trustedRuntime.route(req,res,parts.rawPath)) return;
     if (studio && studio.handles(parts.rawPath)) { await studio.handle(req, res, parts.rawPath, parts.query); return; }
+    // 账号：改密码 / 改名 / 退出设备走 WebSocket（要会话）；只有「忘记密码」的两步和服主的批准走 HTTP ——
+    // 忘了密码的人根本进不了门，等不来一个会话。见 handleAccountRoute。
+    if (parts.rawPath.startsWith('/account/')) { await handleAccountRoute(req, res, parts, health, ctx); return; }
+    // 服主接口：只在**回环**（SSH 里 curl）且带 SP_ADMIN_TOKEN 时存在，别的情况一律 404 —— 不承认自己存在。
+    if (parts.rawPath.startsWith('/admin/')) { await handleAdminRoute(req, res, parts, health, ctx); return; }
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.setHeader('Allow', 'GET, HEAD');
       sendError(req, res, 405, '不支持的请求方法 · Method not allowed');

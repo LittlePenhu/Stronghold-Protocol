@@ -504,7 +504,16 @@ export const C2S = {
   // 给**当前会话**的账号设置 / 更换密码（身份由服务端 session.accountId 裁定，客户端报什么名字都不参与）。
   // 密码是「换设备 / 清了浏览器数据后把账号找回来」的那把备用钥匙：设备凭证丢了它就是唯一的入口。
   // 长度下限由 server/accounts.js setPassword 判（BAD_PASSWORD），这里只挡结构性坏消息。
-  'account.setPassword': { password: (v) => isStr(v, 128) },
+  // `oldPassword`：账号**已经有密码**时改密码必须带上（没有这个闸，拿到设备凭证的人能把主人锁在门外）。
+  'account.setPassword': { password: (v) => isStr(v, 128), oldPassword: (v) => v == null || isStr(v, 128), $optional: ['oldPassword'] },
+  // 账号面板：当前账号的状态（代号 / 设备数 / 有没有密码 / 注册时间），回复是 `ok` + `account`
+  'account.info': {},
+  // 退出这台设备：撤销**当前会话**这张设备凭证（下一次得用密码进来）；会话本身不断线
+  'account.logout': {},
+  // 怀疑被盗：撤销除当前这台以外的全部设备凭证
+  'account.revokeOthers': {},
+  // 改代号（accountId 不变，历史成绩不会分裂）；账号有密码时要带 `password`
+  'account.rename': { name: (v) => isStr(v, NAME_MAX_LEN) && v.trim().length > 0, password: (v) => v == null || isStr(v, 128), $optional: ['password'] },
   // test: only the literal true (DESIGN §34.8). Omit it for a normal room — `false` is a bad field, so a
   // string cannot sneak in as "not a test". The server still refuses it unless SP_TEST_MODE is on.
   'room.create': { mode: (v) => v === 'solo' || v === 'coop', difficulty: (v) => DIFFICULTIES.includes(v), test: (v) => v === true, $optional: ['test'] },
