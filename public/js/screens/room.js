@@ -26,6 +26,7 @@ import { TestMark } from '../ui/testConsole.js';
 import { copyText } from '../ui/clipboard.js';
 import { GuideButton } from '../ui/guide.js';
 import { openStats } from './stats.js';
+import { openRanks } from './ranks.js';
 import { SettingsButton } from '../ui/settings.js';
 import { LoadoutButton } from './loadout.js';
 import { PluginTag, isModdedRoom } from '../ui/pluginTag.js';
@@ -330,6 +331,8 @@ export function RoomScreen() {
           <${MicroLabel}>${t('当前延迟')}<//>
         </div>
         <${Button} variant="secondary" size="sm" icon="chart" class="stats-entry" onClick=${openStats} title=${t('统计数据')} aria-label=${t('统计数据')}>${t('统计')}<//>
+        <${Button} variant="secondary" size="sm" icon="crown" class="ranks-entry" onClick=${openRanks}
+          title=${t('全服排行榜')} aria-label=${t('全服排行榜')} data-testid="room-ranks">${t('排行')}<//>
         <${SettingsButton} class="room-settings" variant="secondary" label=${t('设置')} />
         <${GuideButton} class="room-guide" variant="secondary" label=${t('玩法说明')} />
       </div>

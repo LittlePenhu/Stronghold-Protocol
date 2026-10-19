@@ -392,3 +392,10 @@
 /* 次要列（如达成时间）：压低对比度，不跟数值抢注意力 */
 .st-dim { color: var(--text-lo); }
 
+
+/* 「查看全服排行榜」的入口；以及本机没有记录时的空状态容器。 */
+.st-emptywrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .1rem; }
+.st-emptywrap .st-empty { margin: .4rem auto .1rem; }
+.st-global { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .08rem; margin: 0 0 .2rem; }
+.st-global .st-dim { font-size: max(.13rem, 10px); }
+.st-global .btn { flex: none; }

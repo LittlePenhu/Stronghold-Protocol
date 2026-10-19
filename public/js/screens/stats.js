@@ -26,16 +26,40 @@ import { identity } from '../net.js';
 import { TITLE_HEX_SECTORS, titleSectorClip } from '../ui/titleHexagon.js';
 import { store, createStore, useStore, selectRoute } from '../store.js';
 import { ResultView } from './result.js';
+import { openRanks } from './ranks.js';
 import { toast, toastError } from '../ui/toasts.js';
 import {
   loadStats, saveStats, emptyStats, importStats, exportStats, aggregateStats, countsTowardStats, selfRowOf, roundsOf, isModdedRecord,
   recordToResult, rankByRate, rankEntries, takeTop, withoutNoStack,
   MAX_RECORDS, FULL_KEEP, IMPORT_MAX_CHARS,
   RANK_TOP_N, LATE_GAME_ROUND,
-  trophyMedalOf, strategyBadgeIds, bondMemberChess, highestBondRecord,} from '../ui/stats.js';
+  trophyMedalOf, strategyBadgeIds, bondMemberChess, highestBondRecord,
+} from '../ui/stats.js';
 import { t, N_ } from '../../../shared/i18n.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
+
+/**
+ * 「查看全服排行榜」——本机统计里通往全服榜的入口。
+ *
+ * 两个都是全屏覆盖层，所以先关掉统计再开榜单（否则关榜单会露出下面那一层）。
+ * 没玩过的人也能用：全服榜由服务端结算，和这个浏览器里有没有记录无关。
+ */
+function GlobalRanksLink({ class: cls }) {
+  return html`<div class=${cx('st-global', cls)}>
+    <${Button} variant="secondary" size="sm" icon="crown" data-testid="open-global-ranks"
+      onClick=${() => { closeStats(); openRanks(); }}>${t('查看全服排行榜')}<//>
+    <span class="st-dim">${t('全服榜由服务端结算，没玩过也能看。')}</span>
+  </div>`;
+}
+
+/** 本机没有任何记录时的空状态；排行 tab 额外给一条去全服榜的路。 */
+function EmptyState({ tab }) {
+  return html`<div class="st-emptywrap">
+    <p class="st-empty">${t('还没有记录 —— 完成一局对局后，这里会开始积累。')}</p>
+    ${tab === 'ranks' ? html`<${GlobalRanksLink} />` : null}
+  </div>`;
+}
 
 /** Rows of 对局记录 shown at first and added by each 显示更多. */
 export const HISTORY_PAGE = 50;
@@ -616,8 +640,12 @@ function Averages({ agg }) {
 /** 排行页：四个分区。`ready` 是查名字/图标要的游戏数据。 */
 function Rankings({ agg, gd, ready, minGames, onMinGames }) {
   if (!ready) return html`<div class="st-loading"><${Spinner} size="md" /></div>`;
-  if (!agg.count) return html`<p class="st-empty">${t('还没有记录 —— 完成一局对局后，这里会开始积累。')}</p>`;
+  if (!agg.count) return html`<div class="st-emptywrap">
+    <p class="st-empty">${t('还没有记录 —— 完成一局对局后，这里会开始积累。')}</p>
+    <${GlobalRanksLink} />
+  </div>`;
   return html`
+    <${GlobalRanksLink} />
     <${GroupedRates} agg=${agg} gd=${gd} minGames=${minGames} onMinGames=${onMinGames} />
     <${Favorites} agg=${agg} gd=${gd} />
     <${BondRecords} agg=${agg} gd=${gd} />
@@ -746,7 +774,7 @@ function StatsScreen({ tab, minGames }) {
     <main class="st-body" data-tab=${tab}>
       ${!ready ? html`<div class="st-loading"><${Spinner} size="md" /></div>`
         : stats.newer ? html`<p class="st-empty">${t('检测到更新版本的统计数据，请先升级客户端再查看，以免覆盖数据。')}</p>`
-          : empty ? html`<p class="st-empty">${t('还没有记录 —— 完成一局对局后，这里会开始积累。')}</p>`
+          : empty ? html`<${EmptyState} tab=${tab} />`
             : tab === 'ranks' ? html`<${Rankings} agg=${agg} gd=${gd} ready=${rankReady} minGames=${minGames} onMinGames=${(n) => statsStore.set({ minGames: n })} />`
               : tab === 'bands' ? html`<${Bands} agg=${agg} gd=${gd} records=${stats.records} />`
                 : tab === 'totals' ? html`<${CombatSums} agg=${agg} />`

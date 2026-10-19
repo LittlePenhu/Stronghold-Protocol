@@ -20,6 +20,7 @@ import { html, confirmDialog, Button, Icon, MicroLabel, Panel, TextField, PingPi
 import { toast, toastError } from '../ui/toasts.js';
 import { GuideButton } from '../ui/guide.js';
 import { openStats } from './stats.js';
+import { openRanks } from './ranks.js';
 import { SweepReport } from './sweep.js';
 import { SettingsButton } from '../ui/settings.js';
 import { PwaInstallButton } from '../ui/device.js';
@@ -392,6 +393,8 @@ export function LobbyScreen() {
         <span class="topbar__sep" aria-hidden="true"></span>
         <div class="topbar__tools">
           <${NoticesButton} />
+          <${Button} variant="secondary" size="sm" square=${true} icon="crown" class="lobby-ranks"
+            onClick=${openRanks} title=${t('全服排行榜')} aria-label=${t('全服排行榜')} data-testid="lobby-ranks" />
           <${SettingsButton} class="lobby-settings" variant="secondary" square=${true} />
           <${GuideButton} class="lobby-guide" variant="secondary" square=${true} />
           <${PwaInstallButton} class="lobby-pwa" square=${true} />

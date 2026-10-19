@@ -2305,5 +2305,7 @@
   "重置申请还没被服主批准 —— 把重置码报给服主，等他确认。": "The reset request has not been approved yet — give the reset code to the server owner and wait.",
   "重置码不对（或者已经被新的申请覆盖了）。": "That reset code is not valid (or a newer request replaced it).",
   "重置码过期了，请重新申请。": "The reset code expired — request a new one.",
-  "管理账号": "Manage Account"
+  "管理账号": "Manage Account",
+  "查看全服排行榜": "View the Server Leaderboard",
+  "全服榜由服务端结算，没玩过也能看。": "The server board is scored server-side — it shows up even before your first match."
 }
