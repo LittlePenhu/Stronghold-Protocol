@@ -71,7 +71,11 @@ test('GPL-3.0-or-later: LICENSE, package metadata and notices', () => {
   assert.match(license, /END OF TERMS AND CONDITIONS/);
   assert.equal(pkg.license, 'GPL-3.0-or-later');
   assert.equal(lock.packages[''].license, 'GPL-3.0-or-later');
-  assert.match(pkg.repository.url, /github\.com\/sganggs\/Stronghold-Protocol/);
+  // this fork numbers its own releases (1.0.0 = upstream v0.3.1 + the fork's features) and points its metadata at its
+  // own repository; the upstream project is linked in the README and NOTICE.md
+  assert.match(pkg.repository.url, /github\.com\/LittlePenhu\/Stronghold-Protocol/);
+  assert.match(pkg.homepage, /github\.com\/LittlePenhu\/Stronghold-Protocol/);
+  assert.match(pkg.bugs.url, /github\.com\/LittlePenhu\/Stronghold-Protocol/);
   for (const f of ['NOTICE.md', 'THIRD-PARTY-NOTICES.md', 'tools/local-extract/LICENSE-Ark-Unpacker.txt']) {
     assert.ok(existsSync(join(ROOT, f)), f);
   }

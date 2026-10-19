@@ -2,9 +2,13 @@
 
 《明日方舟》季节性自走棋塔防玩法「卫戍协议：盟约」的**非官方同人复刻**：浏览器即开即玩，单人或 1–4 人联机合作。
 
-![version](https://img.shields.io/badge/version-0.3.1-2ea44f)
+![version](https://img.shields.io/badge/version-1.0.0-2ea44f)
 ![license](https://img.shields.io/badge/code%20license-GPL--3.0--or--later-blue)
 ![node](https://img.shields.io/badge/node-22%20%7C%2024-339933)
+
+> **本仓库是个人自建服的 fork**：`rankings-tab` 分支使用自己的版本号（自 **1.0.0** 起，本版对应上游 v0.3.1），
+> 在上面加了账号系统、密码重置、全服排行榜与实时房间列表（`docs/history/0.2.5-rankings.md` §35）；
+> `master` 保持上游 0.2.5 原样，只多一份说明。上游：<https://github.com/sganggs/Stronghold-Protocol>。
 
 ## 声明
 

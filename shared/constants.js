@@ -4,8 +4,10 @@ import { N_ } from './i18n.js';
 
 export const PROTOCOL_VERSION = 1;
 /** Release version shown to players (title screen, server banner, /healthz). Kept equal to package.json "version"
- * (test/version.test.js); PROTOCOL_VERSION above is the separate wire-format number. */
-export const APP_VERSION = '0.3.1';
+ * (test/version.test.js); PROTOCOL_VERSION above is the separate wire-format number.
+ * This fork numbers its own releases from 1.0.0 (the upstream baseline of each one is named in CHANGELOG.md and
+ * docs/history/0.2.5-rankings.md §35.11); it no longer adopts the upstream version number. */
+export const APP_VERSION = '1.0.0';
 /** A development build (the public `dev` branch): the title screen, the boot banner and the README say so, and
  * tools/package.mjs refuses to build a release zip from it without --allow-dev. */
 export const DEV_BUILD = /-dev$/.test(APP_VERSION);
