@@ -23,7 +23,9 @@ aklz4.py registers a decoder for it. This script pulls the art the web sources l
   - for the official 3D board (DESIGN §15): the map theme's Material parameters (map/<theme>/materials.json; shader
     names resolved through the shaders/*.ab bundles), the background / device meshes as Wavefront OBJ
     (mesh/<bundle>/<mesh>.obj; UnityPy's exporter, X mirrored into a right-handed frame) and their GameObject
-    placement (mesh/<bundle>/prefab.json)
+    placement (mesh/<bundle>/prefab.json); of the 卫戍协议 device bundle (arts/maps/common/trap/trap_110.ab) only the
+    射击台 (trap_1106_achplat) and 阻隔工事 (trap_1105_accrate): mesh, texture, material → mesh/trap_110, which the
+    board draws in place of the 射击台's slab and of the crate's box (GitHub #663)
   - the standard gate / objective effects of every battle map (arts/effects/[pack]map.ab → map/fx: the [opt]start_box /
     [opt]end_box / [opt]start_fly meshes, their merged additive textures, materials and prefab), the blower's texture
     (arts/maps/common/res.ab → map/common: TX_wind_device of the s_wind_device mesh) and the shared water / noise
@@ -32,20 +34,28 @@ aklz4.py registers a decoder for it. This script pulls the art the web sources l
     DXT5nm in an older bundle: AG = XY, R = 1) and metallic/gloss with the smoothness in A; the board renderer needs
     an RGB normal map (Z rebuilt) and a roughness map in G (1 − smoothness; metalness B = 0), written next to the
     source as <name>_rgb.png / _rough.png
-  - WebP copies of the board textures every player downloads with the 3D board (WEBP), written next to their PNGs;
-    the manifest lists the copy
+  - WebP copies of the board textures every player downloads with the 3D board (WEBP) and of the 19 guidebook pages
+    (GUIDE_WEBP_*), written next to their PNGs; the manifest lists the copy
   - the official battlefield scenes (scenes.py SCENES: one prebuilt scene per 卫戍协议 battlefield) → scene/<stageId>/
     scene.json + scene.bin + lightmap pages and scene/tex/ (the materials' albedo textures). The scene bundles ship
     only while the season runs: they are read from the client when it has them, else from --scenes <dir> (default
     .cache/official-scenes/*, filled by tools/local-extract/fetch_scenes.py)
+  - the official battle effects (特效) of the mode's operators, enemies and tokens (fx.py, DESIGN §33)
+    → fx/index.json, fx/textures.json, fx/prefabs/*.json, fx/tex/**.webp, fx/mesh/*.json, listed in their own
+    data/local-fx.json (next to --manifest; data/local-assets.json has no fx group);
+    only with an explicit --only fx (a plain run leaves them out): the Phase 1a sample by default, --fx-set used for
+    every effect the units reference, --fx-keys <k1,k2> for named prefabs
 
 Usage:
   python3 -m venv .venv && .venv/bin/pip install -r tools/local-extract/requirements.txt
   .venv/bin/python tools/local-extract/extract.py [--game <AB root>] [--out public/assets/local] [--only <subdir prefix>]
-  python3 tools/local-extract/extract.py --print-jobs     (the job table as JSON; needs no dependencies)
-  python3 tools/local-extract/extract.py --webp           (only the WebP copies, from the PNGs already extracted —
-                                                          e.g. the local art copied from a release bundle; needs Pillow)
+  python3 tools/local-extract/extract.py --print-jobs     (the job table as JSON, including expectedGroups; needs no dependencies)
+  python3 tools/local-extract/extract.py --webp           (only the WebP copies of the board textures and the guide
+                                                          pages, from the PNGs already extracted — e.g. the local art
+                                                          copied from a release bundle; needs Pillow)
   .venv/bin/python tools/local-extract/extract.py --only scene [--scenes <dir of in-season bundles>]
+  .venv/bin/python tools/local-extract/extract.py --only fx [--fx-set sample|used] [--fx-keys k1,k2] [--fx-jobs N]
+  .venv/bin/python tools/local-extract/extract.py --only plugin-art [--plugin-root <installation>]
 
 Writes <out>/**.png|.webp|.skel|.atlas and data/local-assets.json (manifest of what was extracted). With --only, just
 the jobs whose output subdir starts with one of the prefixes run, and their groups replace those of the existing
@@ -61,6 +71,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scenes  # noqa: E402  (the battlefield scene table and exporter; imports UnityPy only when it runs)
+import fx  # noqa: E402  (the official battle effects, DESIGN §33; imports UnityPy only when it runs)
+import operators  # noqa: E402 (installed plugin operators' optional official art, §34.28)
 
 ROOT = Path(__file__).resolve().parents[2]
 HOME = Path.home()
@@ -107,6 +119,10 @@ JOBS = [
     # official module (uniequip) type icons, keyed by lower-case type name (e.g. 'mar-x')
     ('spritepack/ui_equip_type_hub_h2_0.ab', 'module', {'Sprite'}),
     *[(rel, f'mesh/{sub}', {'Mesh', 'GameObject', 'Material', 'Texture2D'}) for rel, sub in MESH_BUNDLES],
+    # the official 射击台 model (GitHub round 40: 战场#03's raised tiles by the blue gate were our flat grey slab): the
+    # bundle holds every 卫戍协议 device model; keep 射击台 and 阻隔工事 (trap_1105_accrate, #663)
+    ('arts/maps/common/trap/trap_110.ab', 'mesh/trap_110', {'Mesh', 'GameObject', 'Material', 'Texture2D'},
+     r'^((MT|TX)_)?(trap_1106_achplat|trap_1105_accrate)$'),
     ('arts/effects/[pack]map.ab', 'map/fx', {'Mesh', 'GameObject', 'Material', 'Texture2D'}),
     ('arts/maps/common/res.ab', 'map/common', {'Material', 'Texture2D'}, r'^(TX|MT)_wind_device$'),
     ('arts/maps/effect.ab', 'map/water', {'Texture2D'}, r'water_normal|Caustics|WaterNoise|noise_clouds|Water_Foam|SmoothWaves'),
@@ -182,10 +198,25 @@ WEBP = [
     ('map/water', '[ucp]TX_water_normal', 'lossless'),
     ('map/water', 'TX_Caustics256', 'lossy'),
     ('map/water', 'T_noise_clouds_01', 'lossless'),
+    ('mesh/trap_110', 'TX_trap_1106_achplat', 'lossy'),
+    ('mesh/trap_110', 'TX_trap_1105_accrate', 'lossy'),
 ]
 WEBP_OPTIONS = {
     'lossy': {'quality': 95, 'method': 6, 'alpha_quality': 100, 'exact': True},
     'lossless': {'lossless': True, 'quality': 100, 'method': 6, 'exact': True},
+}
+
+# The 19 玩法说明 pages (output subdir guide: 1024², opaque) get a WebP copy too — every page PNG of the group, each a
+# 1.2–1.5 MB download whenever a player opens the guide (public/js/ui/guide.js shows the local page first and preloads
+# the next one). Lossy quality 90, the maintainer's choice of 2026-10-12 after a side-by-side comparison at 2× (DESIGN
+# §31.1, docs/history/0.2.6.md): 25.6 MB of PNG → 4.2 MB on the CN client's pages (lossless would be 17.4 MB);
+# `extract.py --webp` rewrites the copies when GUIDE_WEBP_MODE changes. Method 4: method 6 spends about 8 s
+# a page for 0.4 % less.
+GUIDE_WEBP_SUB = 'guide'
+GUIDE_WEBP_MODE = 'lossy'
+GUIDE_WEBP_OPTIONS = {
+    'lossless': {'lossless': True, 'quality': 100, 'method': 4, 'exact': True},
+    'lossy': {'quality': 90, 'method': 4, 'alpha_quality': 100},
 }
 
 # Shader bundles loaded beside every job that exports Materials, only so that the materials' shader references
@@ -454,11 +485,22 @@ def run_derived(out_root, sub, manifest, log):
     return n
 
 
+def webp_targets(sub, manifest):
+    """(name, mode, Pillow options) of every WebP copy output subdir `sub` gets: its WEBP rows and, for the guide, each
+    page of the group (an image entry: its path ends in .png, or in .webp after an earlier run)."""
+    out = [(name, mode, WEBP_OPTIONS[mode]) for wsub, name, mode in WEBP if wsub == sub]
+    if sub == GUIDE_WEBP_SUB:
+        out += [(name, GUIDE_WEBP_MODE, GUIDE_WEBP_OPTIONS[GUIDE_WEBP_MODE])
+                for name, entry in sorted(manifest.get(sub, {}).items())
+                if isinstance(entry, dict) and str(entry.get('path', '')).endswith(('.png', '.webp'))]
+    return out
+
+
 def run_webp(out_root, sub, manifest, log):
-    """Write the WEBP copies of output subdir `sub` from its PNGs and point their manifest entries at them."""
+    """Write the WebP copies of output subdir `sub` from its PNGs and point their manifest entries at them."""
     n = 0
-    for wsub, name, mode in WEBP:
-        entry = manifest.get(sub, {}).get(name) if wsub == sub else None
+    for name, mode, options in webp_targets(sub, manifest):
+        entry = manifest.get(sub, {}).get(name)
         png = Path(out_root) / sub / f'{name}.png'
         if not entry or not png.exists():
             continue
@@ -466,7 +508,7 @@ def run_webp(out_root, sub, manifest, log):
         try:
             from PIL import Image
             with Image.open(png) as img:
-                img.save(dst, 'WEBP', **WEBP_OPTIONS[mode])
+                img.save(dst, 'WEBP', **options)
         except Exception as e:  # no WebP support in this Pillow, or a broken PNG: the entry keeps the PNG
             log(f'  warn webp {name}: {e}')
             continue
@@ -486,10 +528,19 @@ def webp_only(out_root, manifest_path, log):
     if not isinstance(groups, dict):
         print(f'{manifest_path} has no groups. Extract the local art first.', file=sys.stderr)
         return 2
-    n = sum(run_webp(out_root, sub, groups, log) for sub in dict.fromkeys(s for s, _, _ in WEBP))
+    n = sum(run_webp(out_root, sub, groups, log) for sub in dict.fromkeys([*(s for s, _, _ in WEBP), GUIDE_WEBP_SUB]))
     Path(manifest_path).write_text(json.dumps(doc, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
     log(f'done: {n} WebP copies, manifest {manifest_path}')
     return 0 if n else 1
+
+
+def ran_groups(old_groups, new_groups, fx_ran=False):
+    """The groups a run replaces: the ones it wrote, and after an fx run the fx / fx/* groups an earlier fx run left in
+    the manifest (the fx files have their own list, data/local-fx.json, since 0.3.0's Phase 1b — DESIGN §33.1)."""
+    ran = set(new_groups)
+    if fx_ran:
+        ran |= {g for g in (old_groups or {}) if g == fx.FX_SUB or g.startswith(fx.FX_SUB + '/')}
+    return ran
 
 
 def merge_manifest(old_groups, new_groups, ran_subs):
@@ -728,9 +779,33 @@ def write_spine(objects, sda, sub, name, out_root, manifest, log):
     return len(files) + len(pages)
 
 
+def fx_selected(only):
+    """Whether the fx run (fx.py) runs: only when an --only prefix names fx (or a path under it) — a plain run, with no
+    prefix, leaves the effects out (minutes of work and ~100 MB for the full set)."""
+    return any(p.rstrip('/') == fx.FX_SUB or p.startswith(fx.FX_SUB + '/') for p in only)
+
+
 def scene_ids(only):
     """The stage ids of scenes.SCENES that run under --only (all with no prefix, `scene` or a parent of it)."""
     return spine_ids(only, scenes.SCENE_SUB, [sid for sid, _deps in scenes.SCENES])
+
+
+def expected_local_groups():
+    """Group keys a full extract writes into data/local-assets.json (no --only; fx stays out — fx.py FX_GROUPS).
+
+    One key per JOBS output subdir, plus spine/enemy/<id>, spine/token/<id>, scene/<stageId> and scene/tex.
+    Derived maps and WebP copies are files inside those groups, not new keys. Sorted. setup's
+    tools/local-extract/expected.mjs is this list; test/setup-local-freshness.test.js keeps the copy honest.
+    `extract.py --print-jobs` prints it and needs no game client.
+    """
+    keys = [job[1] for job in JOBS]
+    keys += [f'{ENEMY_SPINE_SUB}/{i}' for i in ENEMY_SPINES]
+    keys += [f'{TOKEN_SPINE_SUB}/{i}' for i in TOKEN_SPINES]
+    keys += [f'{scenes.SCENE_SUB}/{sid}' for sid, _deps in scenes.SCENES]
+    keys.append(scenes.TEX_SUB)
+    if len(keys) != len(set(keys)):
+        raise RuntimeError('expected local groups are not unique')
+    return sorted(keys)
 
 
 def scene_roots(ab_root, extra):
@@ -839,15 +914,22 @@ def main():
     ap.add_argument('--game', help='AssetBundle root (…/StreamingAssets/AB/Windows or …/Documents/Bundles)')
     ap.add_argument('--out', default=str(ROOT / 'public/assets/local'))
     ap.add_argument('--manifest', default=str(ROOT / 'data/local-assets.json'))
+    ap.add_argument('--plugin-root', default=str(ROOT), help='installation whose plugin JSON and roster are scanned')
+    ap.add_argument('--plugin-art', action='store_true', help='explicitly include referenced official operator art in a full run')
     ap.add_argument('--only', action='append', default=[], metavar='SUBDIR',
                     help='only run the jobs whose output subdir starts with this prefix (repeatable), e.g. emoticon')
     ap.add_argument('--scenes', action='append', default=[], metavar='DIR',
                     help='an AB root holding the battlefield scene bundles of an in-season version (repeatable; '
                          'searched after --game and before .cache/official-scenes/*)')
     ap.add_argument('--print-jobs', action='store_true', help='print the job table as JSON and exit')
+    ap.add_argument('--fx-set', choices=('sample', 'used'), default='sample',
+                    help='with --only fx: the Phase 1a sample (default) or every effect the mode\'s units reference')
+    ap.add_argument('--fx-keys', default='', metavar='K1,K2',
+                    help='with --only fx: export only these effect prefabs (comma-separated keys)')
+    ap.add_argument('--fx-jobs', type=int, default=0, metavar='N', help='with --only fx: worker processes (default up to 8)')
     ap.add_argument('--webp', action='store_true',
-                    help='only write the WebP copies of the board textures from the PNGs already under --out and list '
-                         'them in the manifest (needs Pillow, not the client)')
+                    help='only write the WebP copies of the board textures and the guide pages from the PNGs already '
+                         'under --out and list them in the manifest (needs Pillow, not the client)')
     args = ap.parse_args()
 
     if args.print_jobs:
@@ -857,9 +939,18 @@ def main():
         webp = [{'sub': sub, 'name': name, 'mode': mode} for sub, name, mode in WEBP]
         print(json.dumps({'emoteThemes': [{'themeId': t, 'dir': d} for t, d in EMOTE_THEMES], 'jobs': jobs,
                           'derived': derived, 'webp': webp,
+                          'guideWebp': {'sub': GUIDE_WEBP_SUB, 'mode': GUIDE_WEBP_MODE,
+                                        'options': GUIDE_WEBP_OPTIONS[GUIDE_WEBP_MODE]},
                           'enemySpines': {'bundles': ENEMY_ART, 'sub': ENEMY_SPINE_SUB, 'ids': ENEMY_SPINES},
                           'tokenSpines': {'bundles': TOKEN_PACKS, 'sub': TOKEN_SPINE_SUB, 'ids': TOKEN_SPINES},
+                          'expectedGroups': expected_local_groups(),
+                          'fx': {'sub': fx.FX_SUB, 'groups': list(fx.FX_GROUPS), 'version': fx.FORMAT_VERSION,
+                                 'indexVersion': fx.INDEX_VERSION, 'meshVersion': fx.MESH_VERSION,
+                                 'manifestVersion': fx.MANIFEST_VERSION, 'optIn': True,
+                                 'sample': {'keys': fx.FX_SAMPLE_KEYS, 'units': fx.FX_SAMPLE_UNITS,
+                                            'coverage': fx.FX_COVERAGE_KEYS}},
                           'scenes': {'sub': scenes.SCENE_SUB, 'tex': scenes.TEX_SUB,
+                                     'version': scenes.SCENE_EXTRACT_VERSION,
                                      'stages': [{'id': sid, 'bundle': scenes.scene_bundle(sid), 'deps': deps}
                                                 for sid, deps in scenes.SCENES]}},
                          ensure_ascii=False))
@@ -875,12 +966,20 @@ def main():
     enemy_ids = spine_ids(args.only, ENEMY_SPINE_SUB, ENEMY_SPINES)
     token_ids = spine_ids(args.only, TOKEN_SPINE_SUB, TOKEN_SPINES)
     stage_ids = scene_ids(args.only)
-    if not jobs and not enemy_ids and not token_ids and not stage_ids:
+    fx_on = fx_selected(args.only)
+    # §34.28: a normal full run is not consent for optional plugin art. --only plugin-art is explicit too.
+    art_on = wants_sub(args.only, operators.SUB) and (bool(args.only) or args.plugin_art)
+    art_ids = spine_ids(args.only, operators.SUB, operators.references(Path(args.plugin_root))) if art_on else []
+    if not jobs and not enemy_ids and not token_ids and not stage_ids and not fx_on and not art_on:
         print(f'--only {args.only}: no job matches', file=sys.stderr)
         return 2
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
     manifest, total = {}, 0
+    chars = {}
+    if art_ids:
+        chars, n = operators.export(ab_root, out_root, manifest, print, art_ids)
+        total += n
     print(f'AB root: {ab_root}')
     for job in jobs:
         total += export_bundle(ab_root, job, out_root, manifest, print)
@@ -888,17 +987,32 @@ def main():
         total += export_enemy_spines(ab_root, out_root, manifest, print, enemy_ids)
     if token_ids:
         total += export_token_spines(ab_root, out_root, manifest, print, token_ids)
+    if fx_on:
+        keys = [k.strip().lower() for k in args.fx_keys.split(',') if k.strip()]
+        total += fx.export_fx(ab_root, out_root, manifest, print, selection=args.fx_set, keys=keys or None,
+                              jobs=args.fx_jobs or None, root=ROOT,
+                              fx_manifest=Path(args.manifest).with_name(fx.FX_MANIFEST))
     if stage_ids:
         total += export_scenes(ab_root, out_root, manifest, print, stage_ids, scene_roots(ab_root, args.scenes))
-    old = {}
-    if args.only and Path(args.manifest).exists():
+    old, old_chars = {}, {}
+    if Path(args.manifest).exists():
         try:
-            old = json.loads(Path(args.manifest).read_text(encoding='utf-8')).get('groups') or {}
+            previous = json.loads(Path(args.manifest).read_text(encoding='utf-8'))
+            old_chars = previous.get('chars') or {}
+            old = previous.get('groups') or {}
+            if not args.only:
+                old = {g: v for g, v in old.items() if g.startswith(('char/', 'spine/char/'))}
         except (OSError, ValueError) as e:
             print(f'warn: previous manifest unreadable ({e}); writing only the re-extracted groups', file=sys.stderr)
-    groups = merge_manifest(old, manifest, set(manifest))  # a missing bundle keeps its previous group
+    # Partial sprite packs keep previously extracted pictures, just as merge_chars keeps their URLs.
+    for group in manifest:
+        if group.startswith('char/'):
+            manifest[group] = {**old.get(group, {}), **manifest[group]}
+    groups = merge_manifest(old, manifest, ran_groups(old, manifest, fx_on))  # a missing bundle keeps its previous group
     count = sum(len(v) for v in groups.values())
     doc = {'version': 1, 'source': 'local-client', 'count': count, 'groups': groups}
+    if old_chars or chars:
+        doc['chars'] = operators.merge_chars(old_chars, chars)
     Path(args.manifest).write_text(json.dumps(doc, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
     print(f'done: {total} files extracted, manifest {args.manifest} ({count} entries)')
     return 0 if total else 1

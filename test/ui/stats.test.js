@@ -15,7 +15,8 @@ import {
   loadStats, saveStats, migrateStats, normalizeRecord, importStats, exportStats, aggregateStats, selfRowOf, roomModeOf,
   recordToResult, compactRecord, fitToBudget, countsTowardStats, roundsOf, clearedRounds, createLiveMatch, observeMatch,
   buildQuitRecord, installStatsRecorder, liveMatch, MIGRATIONS,
-} from '../../public/js/ui/stats.js';
+  LATE_GAME_ROUND, RANK_TOP_N, rankByRate, rankEntries, takeTop, withoutNoStack,
+  trophyMedalOf,} from '../../public/js/ui/stats.js';
 import { createStore, emptyMatch } from '../../public/js/store.js';
 import { normalizeResult } from '../../public/js/ui/gameLogic.js';
 import { PHASE } from '../../shared/constants.js';
@@ -173,6 +174,31 @@ describe('local stats: replay dedupe', () => {
   });
 });
 
+describe('local stats: the room\'s cosmetic plugins (DESIGN §32 P1a review round 2)', () => {
+  const VS = 'ab'.repeat(32);
+  test('every record names the room\'s visual set vs (null without plugins); a cosmetic-only match counts like any (the owner\'s decision of 2026-10-13)', () => {
+    const plain = buildRecord(baseResult(), { myId: 'p1', now: 1 });
+    assert.equal(plain.vs, null, 'no cosmetic plugin: null');
+    const skinned = buildRecord(baseResult({ seed: 7 }), { myId: 'p1', vs: VS, now: 2 });
+    assert.equal(skinned.vs, VS);
+    assert.equal(buildRecord(baseResult(), { myId: 'p1', vs: 'not-a-hash', now: 3 }).vs, null, 'only a visual hash');
+    assert.equal(compactRecord(skinned).vs, VS, 'kept when compacted');
+    assert.equal(normalizeRecord({ ...skinned, vs: 'XX' }).vs, null);
+    // a quit record takes the room's from the app state
+    const s = liveState({ phase: PHASE.PREP, round: 3 });
+    s.room.content = { cs: 'cd'.repeat(32), vanilla: true, vs: VS, plugins: [{ id: 'skin' }] };
+    const quit = buildQuitRecord(s, { live: watched([liveState({ phase: PHASE.INFO_CHECK, round: 0 }), s]), now: 5_000_000 });
+    assert.equal(quit.vs, VS);
+    // the overview counts both alike: cosmetic plugins change neither gameplay nor numbers (the owner's decision of 2026-10-13)
+    let stats = emptyStats();
+    for (const r of [plain, skinned]) stats = appendRecord(stats, r).stats;
+    assert.deepEqual([aggregateStats(stats.records).total, aggregateStats(stats.records).count], [2, 2]);
+    // an id-less (hand-made) record's content id does not depend on vs: the id of a record from before 0.3.0 stays
+    const { id: _id, vs: _vs, ...bare } = plain;
+    assert.equal(normalizeRecord({ ...bare }).id, normalizeRecord({ ...bare, vs: VS }).id);
+  });
+});
+
 describe('local stats: the counting rule (a match entered and left right away does not count)', () => {
   /** A quit record whose player left in `phase` of `round` (alive unless told otherwise). */
   const quitAt = (phase, round, o = {}) => {
@@ -229,7 +255,7 @@ describe('local stats: the counting rule (a match entered and left right away do
     assert.equal(agg.rounds.total, 16 + 5, 'the peek adds nothing');
     assert.equal(agg.byDifficulty.HARD.games, 2);
     assert.deepEqual(agg.bands.band_amiya, { games: 2, wins: 1 });
-    assert.equal(agg.byMode.solo, 2);
+    assert.equal(agg.byMode.solo.games, 2);
   });
 
   test('combat totals read the settled records only (a quit record has no stat block)', () => {
@@ -345,8 +371,7 @@ describe('local stats: bounded storage', () => {
     assert.equal(stats.records.at(-1).t, 30); // oldest 30 dropped
   });
 
-  test(`only the newest ${FULL_KEEP} records keep their rows: the older ones are compacted to the player's own summary`, () => {
-    withStorage((ls) => {
+  test(`the newest ${FULL_KEEP} records keep their rows; older ones compact to the frame + own row — a slim lineup / bond list (read by the rankings), plus trophies, reward and used bonds`, () => {    withStorage((ls) => {
       assert.equal(saveStats(manyRecords(FULL_KEEP + 20)), true);
       const stored = JSON.parse(ls.raw).records;
       assert.equal(stored.length, FULL_KEEP + 20);
@@ -355,15 +380,42 @@ describe('local stats: bounded storage', () => {
       assert.equal(old.compact, true);
       assert.equal(old.players.length, 1, 'no teammates');
       assert.equal(old.players[0].name, undefined, 'no names');
-      assert.equal(old.players[0].lineup, undefined);
+      // 0.2.4：压缩记录保留「精简阵容」—— 排行榜（惯用干员 / 惯用羁绊 / 羁绊胜率 / 羁绊最高层数）要读它，
+      // 在 0.2.4 之前它被整个丢掉，那些统计因此只能覆盖最新的 FULL_KEEP 局。
+      assert.deepEqual(old.players[0].lineup, [{ id: 'char_290_vigna' }], 'operator ids stay');
+      assert.equal(old.players[0].lineup[0].items, undefined, 'items / 等阶 / 棋子位置只有回看结算才用得上，压缩时丢掉');
+      assert.deepEqual(old.players[0].bonds, [{ bondId: 'steadShip', layers: 12, active: true }], 'bondId + layers + active 全留');
       // what the aggregates read is all still there
       const back = loadStats().records;
       assert.deepEqual(aggregateStats(back).bands, aggregateStats(manyRecords(FULL_KEEP + 20).records).bands);
       assert.equal(aggregateStats(back).sums.kills, 41 * (FULL_KEEP + 20));
+      // …and the lineup/bond coverage now spans every kept record, not just the newest FULL_KEEP
+      assert.equal(aggregateStats(back).coverage.lineup, FULL_KEEP + 20);
+      assert.equal(aggregateStats(back).coverage.bonds, FULL_KEEP + 20);
+      assert.equal(aggregateStats(back).chars.char_290_vigna.count, FULL_KEEP + 20);
       // …and the settlement of a compacted record cannot be re-viewed
       assert.equal(recordToResult(back.at(-1)), null);
       assert.ok(recordToResult(back[0]));
     });
+  });
+
+  test('一个人数寥寥的旧压缩记录（0.2.4 之前写入的，lineup / bonds 已在当时丢掉）不会污染阵容统计', () => {
+    // 0.2.4 之前 compactRecord 不写 lineup / bonds，那些记录在存储里就是空数组。
+    // 判断依据只能是「数组里有没有东西」—— 若错用 rec.compact 判断，新压缩记录（有阵容）会被一起跳过；
+    // 若只看数组非空，这里正是要确认旧记录被正确排除。
+    const oldShape = { v: STATS_VERSION, records: [{
+      id: 'r1.old', v: STATS_VERSION, t: 10, end: 'settled', victory: true, roundsPassed: 14, compact: true,
+      stageId: 'act1autochess_m01', bossId: 'boss_1', selfId: 'p1',
+      players: [{ playerId: 'p1', seat: 0, alive: true, victory: true, roundsPassed: 14, stats: { dmgDealt: 100, bossDamage: 50 } }],
+    }] };
+    const { stats } = migrateStats(oldShape);
+    const agg = aggregateStats(stats.records);
+    assert.equal(agg.count, 1);
+    assert.equal(agg.coverage.lineup, 0, '旧压缩记录没有阵容可统计');
+    assert.equal(agg.coverage.bonds, 0);
+    assert.deepEqual(agg.chars, {});
+    assert.deepEqual({ ...agg.bonds }, {});
+    assert.equal(agg.stages.act1autochess_m01.games, 1, '地图胜率仍然统计（frame 里有 stageId）');
   });
 
   test('compactRecord is idempotent and keeps the frame', () => {
@@ -373,10 +425,14 @@ describe('local stats: bounded storage', () => {
     assert.equal(c.difficulty, 'HARD');
     assert.equal(c.durationMs, 952123);
     assert.equal(selfRowOf(normalizeRecord(c)).bandId, 'band_amiya');
+    assert.equal(selfRowOf(normalizeRecord(c)).reward, 88, 'the settlement level sums the 卫戍认证 of every kept match');
   });
 
-  test(`a store of ${MAX_RECORDS} real-size co-op matches fits MAX_CHARS (${MAX_CHARS}) — the oldest few go; solo matches all stay`, () => {
-    // a 4-player settlement with 10-unit lineups, 12 bonds and every stat, as server/match/results.js builds it
+  test(`a store of ${MAX_RECORDS} real-size co-op matches stays inside MAX_CHARS (${MAX_CHARS}) — the oldest go; solo matches all stay`, () => {
+    // A 4-player settlement with 10-unit lineups, 12 bonds and every stat, as server/match/results.js builds it —
+    // deliberately at the heavy end (a full board, every bond slot filled). 0.2.4's compaction keeps a slim lineup
+    // so the rankings can read every stored match, which makes each kept record bigger: MAX_RECORDS of THESE no
+    // longer fit. See the bound below for the measured numbers.
     const row = (i) => ({
       playerId: `p${i}`, seat: i, name: `博士${i}`, isBot: i > 1, left: false, alive: true, victory: true, roundsPassed: 14, eliminatedRound: null, lp: 12,
       bandId: `band_${i}`, title: { id: 'comment_3', name: '坚若磐石', picId: 'comment_icon_3', text: '目标生命值损失最少' }, trophies: 5, reward: 425,
@@ -387,8 +443,11 @@ describe('local stats: bounded storage', () => {
     const coop = (i) => baseResult({ seed: i, modeId: 'mode_multi_hard', players: [row(1), row(2), row(3), row(4)].map((r, k) => (k === 0 ? { ...r, playerId: 'p1' } : r)) });
     const stats = manyRecords(MAX_RECORDS, coop);
     const fit = fitToBudget(stats.records);
-    assert.ok(fit.length >= 900 && fit.length <= MAX_RECORDS, `kept ${fit.length}`);
-    assert.equal(fit[0].t, MAX_RECORDS - 1, 'the newest first');
+    // 保留「精简阵容」的代价：满配数据下从 ≥900 局降到三百多局。
+    // 实测（tmp 测量脚本，同一条数据构造）——单人 6 干员/5 羁绊 746 局、单人 8/6（典型）674 局、
+    // 单人满 12/12 490 局、双人 8/6 634 局；合并 0.3.x 之后每条记录还多了 trophies / reward / usedBondIds。
+    // 一般玩家的总对局数远低于此。下面的下界按实测值取。
+    assert.ok(fit.length >= 300 && fit.length <= MAX_RECORDS, `kept ${fit.length}`);    assert.equal(fit[0].t, MAX_RECORDS - 1, 'the newest first');
     assert.ok(JSON.stringify({ v: 1, records: fit }).length <= MAX_CHARS);
     withStorage((ls) => { assert.equal(saveStats(stats), true); assert.ok(ls.raw.length <= MAX_CHARS); });
     const solo = manyRecords(MAX_RECORDS, (i) => baseResult({ seed: i, players: [baseResult().players[0]] }));
@@ -579,6 +638,23 @@ describe('local stats: corrupt and old storage', () => {
 });
 
 describe('local stats: export / import merge', () => {
+  test('an import offers the newest valid self nickname without taking a teammate or existing-history name', () => {
+    const newest = buildRecord(baseResult({ seed: 3 }), { myId: 'p1', now: 3 });
+    newest.players[0].name = '\u200b';
+    newest.players[1].name = 'Teammate';
+    const named = buildRecord(baseResult({ seed: 2 }), { myId: 'p1', now: 2 });
+    named.players[0].name = '  Archive\u200bID  ';
+    const older = buildRecord(baseResult({ seed: 1 }), { myId: 'p1', now: 1 });
+    older.players[0].name = 'OldID';
+    const existing = buildRecord(baseResult({ seed: 4 }), { myId: 'p1', now: 4 });
+    existing.players[0].name = 'ExistingID';
+    const incoming = { v: STATS_VERSION, records: [older, newest, named] };
+    assert.equal(importStats(incoming, { records: [existing] }).name, 'ArchiveID');
+    assert.equal(importStats(incoming, { records: [existing, newest, named, older] }).name, 'ArchiveID', 'duplicate imports can also recover an unknown ID');
+    assert.equal(importStats({ v: STATS_VERSION, records: [compactRecord(named), newest] }, { records: [existing] }).name, '', 'no usable imported self name stays unknown');
+    assert.equal(importStats({ v: STATS_VERSION, records: [] }, { records: [existing] }).name, '');
+  });
+
   test('export → import round-trips; merge unions by id, newest first, and counts added / skipped', () => {
     withStorage(() => {
       const rec = recordResult(baseResult(), { myId: 'p1', now: 1000 });
@@ -654,8 +730,8 @@ describe('local stats: aggregation (what the page renders)', () => {
     assert.equal(agg.duration.totalMs, 952123 + 300000);
     assert.equal(agg.hidden.reached, 1);
     assert.equal(agg.hidden.cleared, 1);
-    assert.equal(agg.byMode.solo, 1);
-    assert.equal(agg.byMode.coop, 1);
+    assert.equal(agg.byMode.solo.games, 1);
+    assert.equal(agg.byMode.coop.games, 1);
   });
 
   test('per-difficulty rows; an unknown difficulty is keyed UNKNOWN (never a translated text)', () => {
@@ -668,6 +744,74 @@ describe('local stats: aggregation (what the page renders)', () => {
   test('per-band games / passed and self titles', () => {
     assert.deepEqual(agg.bands.band_amiya, { games: 2, wins: 1 });
     assert.equal(agg.titles.comment_1.count, 1); // only the win granted 卫戍之星
+  });
+
+  test('alliance usage counts self active settlement bonds once per match, independent of layers', () => {
+    const first = buildRecord(baseResult({ players: [
+      { ...baseResult().players[0], bonds: [
+        { bondId: 'yanShip', active: true, layers: 0 }, { bondId: 'yanShip', active: true, layers: 999 },
+        { bondId: 'steadShip', active: false, layers: 500 }, { bondId: 'soloShip', active: true, layers: 0 },
+      ] }, { ...baseResult().players[1], bonds: [{ bondId: 'egirShip', active: true, layers: 999 }] },
+    ] }), { myId: 'p1', now: 1 });
+    const second = buildRecord(baseResult({ seed: 2, victory: false, players: [{ ...baseResult().players[0], victory: false,
+      bonds: [{ bondId: 'yanShip', active: true, layers: 1 }, { bondId: 'steadShip', active: true, layers: 10 }],
+    }] }), { myId: 'p1', now: 2 });
+    const quit = { ...first, id: 'quit', end: 'quit' };
+    // 盟约的「用过几局」由 self.bonds 的 active 行累加（每个 bondId 每局一次）；本 fork 在同一张表里还记着
+    // wins / sumLayers / maxLayers（排行 tab 要读），所以这里只钉住 games 那一列。
+    const usage = Object.fromEntries(Object.entries(aggregateStats([first, second, quit]).bonds).map(([id, b]) => [id, b.games]));
+    assert.deepEqual(usage, { yanShip: 2, soloShip: 1, steadShip: 1 });
+  });
+
+  test('active alliance usage survives compaction and transfer; v2 rows with discarded bonds stay unknown', () => {
+    const full = buildRecord(baseResult(), { myId: 'p1', now: 1 });
+    const compact = compactRecord(full);
+    assert.deepEqual(compact.players[0].usedBondIds, ['steadShip']);
+    // 本 fork 的压缩记录仍留一份精简阵容（排行 tab 要读），所以 bonds 不是 undefined —— 只剩统计要的两个字段
+    assert.deepEqual(compact.players[0].bonds, [{ bondId: 'steadShip', layers: 12, active: true }]);
+    const transferred = importStats(exportStats({ v: STATS_VERSION, records: [compact] }), emptyStats());
+    assert.deepEqual(Object.fromEntries(Object.entries(aggregateStats(transferred.stats.records).bonds).map(([id, b]) => [id, b.games])), { steadShip: 1 });
+    // v2 时代压缩掉的记录既没有阵容行、也没有 usedBondIds —— 无从判断，只能算「不知道」，不进任何一组
+    const legacy = { ...compact, id: 'old', players: [{ ...compact.players[0], usedBondIds: undefined, bonds: undefined }] };
+    const migrated = migrateStats({ v: 2, records: [full, legacy] });
+    assert.equal(migrated.stats.v, STATS_VERSION);
+    assert.deepEqual(Object.fromEntries(Object.entries(aggregateStats(migrated.stats.records).bonds).map(([id, b]) => [id, b.games])), { steadShip: 1 });
+  });
+
+  test('mode rows separate successful defense from hidden-core clears and use the player outcome', () => {
+    const solo = buildRecord(baseResult({ hiddenCleared: false }), { myId: 'p1', roomMode: 'solo', now: 1 });
+    const coop = buildRecord(baseResult(), { myId: 'p1', roomMode: 'coop', now: 2 });
+    const eliminated = buildRecord(baseResult(), { myId: 'p2', roomMode: 'coop', now: 3 });
+    const summary = aggregateStats([solo, coop, eliminated]);
+    assert.deepEqual(summary.byMode.solo, { games: 1, wins: 1, hiddenCleared: 0 }, 'failing the hidden core keeps the final-boss win');
+    assert.deepEqual(summary.byMode.coop, { games: 2, wins: 1, hiddenCleared: 1 }, 'an eliminated teammate gets neither a personal clear nor a breakthrough');
+    assert.deepEqual(aggregateStats([]).byMode, {
+      solo: { games: 0, wins: 0, hiddenCleared: 0 }, coop: { games: 0, wins: 0, hiddenCleared: 0 },
+    });
+  });
+
+  test('trophy totals count self settled co-op awards, including defeats, and survive compaction and transfer', () => {
+    const records = [['coop', 5, true, 'match'], ['coop', 2, false, 'match'], ['solo', 999, true, 'match'], ['coop', 999, false, 'quit']].map(([mode, award, won, end], i) => {
+      const rec = buildRecord(baseResult({ seed: i + 1, victory: won, modeId: mode === 'coop' ? 'mode_multi_hard' : 'mode_single_hard',
+        players: [{ ...baseResult().players[0], trophies: award, victory: won }, { ...baseResult().players[1], trophies: 999 }],
+      }), { myId: 'p1', roomMode: mode, now: i + 1 });
+      rec.end = end;
+      return rec;
+    });
+    assert.equal(aggregateStats(records).trophies, 7, 'solo, quit and teammate awards must not inflate the total');
+    const compacted = records.map(compactRecord);
+    const transferred = importStats(exportStats({ v: STATS_VERSION, records: compacted }), emptyStats());
+    assert.equal(aggregateStats(transferred.stats.records).trophies, 7, 'discarding replay details and exporting must retain actual rewards');
+  });
+
+  test('trophy medals choose the highest eligible configured threshold regardless of row order', () => {
+    const medals = [{ count: 20, iconId: 'high' }, { count: 0, iconId: 'base' }, { count: 5, iconId: 'mid' }];
+    assert.equal(trophyMedalOf(4, medals).iconId, 'base');
+    assert.equal(trophyMedalOf(5, medals).iconId, 'mid');
+    assert.equal(trophyMedalOf(19, medals).iconId, 'mid');
+    assert.equal(trophyMedalOf(20, medals).iconId, 'high');
+    assert.equal(trophyMedalOf(100, medals).iconId, 'high');
+    assert.equal(trophyMedalOf(0, null), null);
   });
 
   test('combat sums over the self player only', () => {
@@ -689,6 +833,123 @@ describe('local stats: aggregation (what the page renders)', () => {
     assert.equal(e.rounds.max, 0);
     assert.deepEqual(e.byDifficulty, {});
     assert.equal(aggregateStats(null).total, 0);
+  });
+});
+
+describe('local stats: 排行 (grouped win rates, averages, favorites, bond records)', () => {
+  /** One settled record from a few knobs — the assertions below read better than a wall of m.result. */
+  const rec = ({
+    stage = 'act1autochess_m01', boss = 'boss_1', hiddenBoss = null, won = true, rounds = 14, t = 1000,
+    lineup = [], bonds = [], stats = null, end = 'settled',
+  } = {}) => normalizeRecord({
+    t, end, victory: won, roundsPassed: rounds, stageId: stage, bossId: boss, hiddenBossId: hiddenBoss,
+    selfId: 'p1',
+    players: [{ playerId: 'p1', seat: 0, alive: true, victory: won, roundsPassed: rounds, lineup, bonds, ...(stats ? { stats } : {}) }],
+  });
+
+  test('地图 / 首领 / 隐藏首领 各按自己的 id 分组算胜率', () => {
+    const agg = aggregateStats([
+      rec({ stage: 'm01', boss: 'boss_1', hiddenBoss: 'boss_10', won: true }),
+      rec({ stage: 'm01', boss: 'boss_1', won: false, t: 2000 }),
+      rec({ stage: 'm02', boss: 'boss_2', won: true, t: 3000 }),
+      rec({ stage: 'm02', boss: 'boss_2', hiddenBoss: 'boss_10', won: true, t: 4000 }),
+    ]);
+    assert.deepEqual(agg.stages.m01, { games: 2, wins: 1 });
+    assert.deepEqual(agg.stages.m02, { games: 2, wins: 2 });
+    assert.deepEqual(agg.bosses.boss_1, { games: 2, wins: 1 });
+    // 隐藏首领单独一张表：只有到达隐秘核心的局才有 hiddenBossId（2 局到达、2 局通关）
+    assert.deepEqual(agg.hiddenBosses.boss_10, { games: 2, wins: 2 });
+  });
+
+  test('stageId / bossId 缺失的记录不建组 —— 导入的手工数据不该污染分母', () => {
+    const agg = aggregateStats([rec({ stage: null, boss: null })]);
+    assert.deepEqual(agg.stages, {});
+    assert.deepEqual(agg.bosses, {});
+    assert.deepEqual(agg.hiddenBosses, {});
+    assert.equal(agg.count, 1, '但仍然计入总局数');
+  });
+
+  test('惯用干员：按出现次数计数，召唤物不算干员，同名多张算多次出现但只算一局', () => {
+    const agg = aggregateStats([
+      rec({ lineup: [{ id: 'char_a' }, { id: 'char_a' }, { id: 'char_b' }, { id: 'tok_1', kind: 'token' }] }),
+      rec({ lineup: [{ id: 'char_a' }], t: 2000 }),
+    ]);
+    assert.deepEqual(agg.chars.char_a, { count: 3, games: 2 });
+    assert.deepEqual(agg.chars.char_b, { count: 1, games: 1 });
+    assert.equal(agg.chars.tok_1, undefined, '召唤物不参与「惯用干员」');
+    assert.equal(agg.coverage.lineup, 2);
+  });
+
+  test('羁绊胜率按「激活过的局数」算；最高层数不管有没有激活都记，并留下达成时间', () => {
+    const agg = aggregateStats([
+      rec({ won: true, bonds: [{ bondId: 'yanShip', layers: 9, active: true }] }),
+      rec({ won: false, t: 2000, bonds: [{ bondId: 'yanShip', layers: 4, active: false }] }),
+      rec({ won: true, t: 3000, bonds: [{ bondId: 'yanShip', layers: 12, active: true }] }),
+    ]);
+    const b = agg.bonds.yanShip;
+    assert.equal(b.games, 2, '3 局都带着它，但只有 2 局激活');
+    assert.equal(b.wins, 2);
+    assert.equal(b.sumLayers, 21, '平均叠层只累加激活时的 9 + 12');
+    assert.equal(b.maxLayers, 12, '未激活那局的 4 层不拉高它');
+    assert.equal(b.maxLayersAt, 3000, '记下是哪一局达到的');
+    assert.equal(agg.coverage.bonds, 3);
+  });
+
+  test('战斗均值的分母是「真的有这个数字的记录数」，quit 记录不进分母', () => {
+    const agg = aggregateStats([
+      rec({ stats: { dmgDealt: 100, bossDamage: 10 } }),
+      rec({ stats: { dmgDealt: 300 }, t: 2000 }), // 这一局没有 bossDamage
+      rec({ end: 'quit', stats: { dmgDealt: 999 }, t: 3000, rounds: 5, won: false }),
+    ]);
+    assert.deepEqual(agg.averages.dmgDealt, { sum: 400, n: 2 });
+    assert.deepEqual(agg.averages.bossDamage, { sum: 10, n: 1 });
+    assert.equal(agg.count, 3, 'quit 局计入总局数，只是进不了战斗均值');
+  });
+
+  test(`局平均领袖伤害只算 ${LATE_GAME_ROUND} 回合及以后的对局（门槛只作用于这一个指标）`, () => {
+    const agg = aggregateStats([
+      rec({ stats: { bossDamage: 10 }, rounds: 14 }),
+      rec({ stats: { bossDamage: 20 }, rounds: 13, t: 2000 }),
+      rec({ stats: { bossDamage: 40 }, rounds: 12, t: 3000 }),
+      rec({ stats: { bossDamage: 80 }, rounds: 1, t: 4000 }),
+    ]);
+    assert.deepEqual(agg.averages.bossDamage, { sum: 150, n: 4 }, '不设门槛的均值仍然完整');
+    assert.deepEqual(agg.averages.bossDamageLate, { sum: 30, n: 2 }, '13 回合及以后的 2 局');
+  });
+
+  test('覆盖率如实反映「有多少局真的带着阵容」—— 旧压缩记录是空数组，不会被当成有数据', () => {
+    const agg = aggregateStats([
+      rec({ lineup: [{ id: 'char_a' }], bonds: [{ bondId: 'b1', layers: 3, active: true }] }),
+      rec({ t: 2000 }), // 空阵容
+    ]);
+    assert.equal(agg.count, 2);
+    assert.equal(agg.coverage.lineup, 1);
+    assert.equal(agg.coverage.bonds, 1);
+  });
+
+  test('rankByRate：样本达标的排在前面，组内按 胜率 → 局数 → id', () => {
+    const g = {
+      small: { games: 1, wins: 1 },   // 100%，但只打过 1 局
+      a: { games: 10, wins: 7 },
+      b: { games: 10, wins: 7 },      // 与 a 完全并列 → 由 id 定序
+      c: { games: 20, wins: 10 },     // 50%
+      noval: { games: 0, wins: 0 },
+    };
+    assert.deepEqual(rankByRate(g, { minGames: 3 }).map(([k]) => k), ['a', 'b', 'c', 'small', 'noval']);
+    assert.equal(rankByRate(g).map(([k]) => k)[0], 'small', '不设门槛时 1 局 100% 就排第一（页面靠显示局数让人自己判断）');
+  });
+
+  test('rankEntries：主键降序 → 次键降序 → id 升序，并列项的次序永远一致', () => {
+    const e = [['b', { n: 2, l: 5 }], ['a', { n: 2, l: 5 }], ['c', { n: 2, l: 9 }], ['d', { n: 1, l: 99 }]];
+    assert.deepEqual(rankEntries(e, (v) => v.n, (v) => v.l).map(([k]) => k), ['c', 'a', 'b', 'd']);
+  });
+
+  test('takeTop：并列卡在边界时全部收录 —— 多画一行，也不静默砍掉一个同样常用的', () => {
+    const tie = [['a', { c: 5 }], ['b', { c: 5 }], ['c', { c: 5 }], ['d', { c: 5 }], ['e', { c: 5 }], ['f', { c: 5 }], ['g', { c: 1 }]];
+    assert.equal(takeTop(tie, (v) => v.c, RANK_TOP_N).length, 6, '第 5、第 6 名同为 5 次 → 都进榜');
+    const clear = [['a', { c: 9 }], ['b', { c: 8 }], ['c', { c: 7 }], ['d', { c: 6 }], ['e', { c: 5 }], ['f', { c: 4 }]];
+    assert.equal(takeTop(clear, (v) => v.c, RANK_TOP_N).length, 5);
+    assert.equal(takeTop([['a', { c: 1 }]], (v) => v.c, RANK_TOP_N).length, 1, '不足 N 个就全给');
   });
 });
 
@@ -723,5 +984,68 @@ describe('local stats: recordToResult (history row → settlement re-view)', () 
     assert.equal('lastRound' in recordToResult(rec), false);
     assert.equal(recordToResult(null), null);
     assert.equal(recordToResult({ players: [] }), null);
+  });
+});
+
+describe('local stats: 不叠层的盟约（bonds.json 的 noStack）不进叠层类排行', () => {
+  // 只喂给 withoutNoStack 的查表替身：真实数据里 bondId → { name, noStack }
+  const BONDS = {
+    yanShip: { name: '炎', noStack: false },
+    sargonShip: { name: '萨尔贡', noStack: false },
+    // 这四条是 bonds.json 里仅有的 noStack: true（游戏机制上不叠层，游戏自己也不显示层数）
+    maniShip: { name: '调和', noStack: true },
+    emptyShip: { name: '协防干员', noStack: true },
+    soloShip: { name: '独行', noStack: true },
+    suntShip: { name: '绝技', noStack: true },
+  };
+  const bondOf = (id) => BONDS[id];
+  const ids = (entries) => entries.map(([id]) => id);
+
+  test('剔掉 noStack 的，保留其余的', () => {
+    const entries = [['yanShip', {}], ['suntShip', {}], ['sargonShip', {}], ['soloShip', {}], ['maniShip', {}], ['emptyShip', {}]];
+    assert.deepEqual(ids(withoutNoStack(entries, bondOf)), ['yanShip', 'sargonShip']);
+  });
+
+  test('恰好就是那四条 —— 用真实的 noStack 名单钉住，防上游改了数据表后静默漂移', () => {
+    const all = Object.entries(BONDS).map(([id, v]) => [id, v]);
+    const kept = ids(withoutNoStack(all, bondOf));
+    for (const id of ['suntShip', 'soloShip', 'maniShip', 'emptyShip']) {
+      assert.equal(kept.includes(id), false, `${id} 应被剔除`);
+    }
+    assert.deepEqual(kept.sort(), ['sargonShip', 'yanShip']);
+  });
+
+  test('查表里没有这个 id 时**不剔**（宁可多显示一行，也不要凭空丢数据）', () => {
+    assert.deepEqual(ids(withoutNoStack([['unknownBond', {}]], bondOf)), ['unknownBond']);
+  });
+
+  test('入参异常时不抛：非数组给空，查表不是函数时原样返回', () => {
+    assert.deepEqual(withoutNoStack(null, bondOf), []);
+    assert.deepEqual(withoutNoStack(undefined, bondOf), []);
+    const entries = [['yanShip', {}], ['suntShip', {}]];
+    assert.deepEqual(ids(withoutNoStack(entries, null)), ['yanShip', 'suntShip']);
+  });
+
+  // 这是用户明确要求的行为：过滤发生在 takeTop **之前**，所以第 6 名会补上来。
+  // 如果哪天有人把过滤挪到 takeTop 之后，这条会红。
+  test('递补：剔掉一个之后前 5 名仍是 5 条（不是 4 条）', () => {
+    const mk = (id, games) => [id, { games, wins: 0, sumLayers: games * 3, maxLayers: games }];
+    // 按 games 降序：绝技(noStack,100) 炎(90) 萨尔贡(80) 维多利亚(70) 谢拉格(60) 拉特兰(50)
+    const raw = [
+      mk('suntShip', 100), mk('yanShip', 90), mk('sargonShip', 80),
+      mk('victoriaShip', 70), mk('kjeragShip', 60), mk('lateranoShip', 50),
+    ];
+    const ranked = (entries) => rankEntries(entries, (v) => v.games, (v) => v.sumLayers);
+
+    // 不过滤：前 5 里含「绝技」（会显示一个无意义的「平均 N 层」）
+    assert.deepEqual(
+      ids(takeTop(ranked(raw), (v) => v.games)),
+      ['suntShip', 'yanShip', 'sargonShip', 'victoriaShip', 'kjeragShip'],
+    );
+    // 过滤后：绝技被剔，第 6 名「拉特兰」补位，仍然是 5 条
+    const top = takeTop(ranked(withoutNoStack(raw, bondOf)), (v) => v.games);
+    assert.deepEqual(ids(top), ['yanShip', 'sargonShip', 'victoriaShip', 'kjeragShip', 'lateranoShip']);
+    assert.equal(top.length, 5);
+    assert.equal(ids(top).includes('suntShip'), false);
   });
 });

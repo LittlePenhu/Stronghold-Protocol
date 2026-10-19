@@ -30,8 +30,11 @@
 // The handler object (implemented by server/lobby.js) receives:
 //   onHello(session, { resumed, repeat })  after `welcome` was sent
 //   welcomeInfo() → object (optional)      extra fields of every `welcome` (never one of its own keys): the lobby's
-//                                          `diyKitted` (0.2.0 自选编队 — which operators a DIY slot may field)
-//   onMessage(session, msg) → { ok: true } | { error: ERR code, detail?: string } | undefined
+//                                          `diyKitted` (0.2.0 自选编队 — which operators a DIY slot may field) and
+//                                          `content` ({ vanilla: <cs> }, the server's content hash — DESIGN §32)
+//   onMessage(session, msg) → { ok: true } | { error: ERR code, detail?: string } | undefined — or a Promise of one
+//                                          (a room whose match runs in a match host worker, DESIGN §32.6: the reply
+//                                          goes out when it settles; a rejection is INTERNAL)
 //   routeGame(session, msg) → same (optional): client-side combat reports `b.progress` / `b.result` (DESIGN §14) go
 //                                          straight to the running match through it; without it they reach onMessage
 //   onDisconnect(session)                  the session's socket closed (session kept for the reconnect window)
@@ -41,6 +44,7 @@ import { randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { C2S, validateC2S } from '../shared/protocol.js';
 import { ERR, ERR_TEXT, NAME_MAX_LEN, PROTOCOL_VERSION } from '../shared/constants.js';
+import { tokenHash } from './accounts.js';
 
 /** Tunables (all overridable through the Network / SessionRegistry constructors). */
 export const NET_DEFAULTS = Object.freeze({
@@ -64,13 +68,33 @@ export const NET_DEFAULTS = Object.freeze({
  * Intents that also draw from the per-connection heavy bucket: g.watch (its reply is a large state resend, m.field),
  * room.loadout (a ≤ 160-entry map and ≤ 256 operator settings validated against the game data; the client debounces its
  * edits), room.ownership
- * (a ≤ 160-id list, the same way), room.diy (≤ 8 自选 picks checked against the data, the same way) and room.spectate
- * (taking a spectator seat in a running match resends its state like a watcher's g.watch — server/lobby.js spectate).
+ * (a ≤ 160-id list, the same way), room.diy (≤ 8 自选 picks checked against the data, the same way), room.spectate
+ * (taking a spectator seat in a running match resends its state like a watcher's g.watch — server/lobby.js spectate) and
+ * room.setPlugins (a new visual set: every member downloads its art manifest — server/plugins/visualSet.js).
+ * room.skins (docs/SKINS.md) is a small `{ [charId]: skinId }` map, sent on every edit of the appearance.
  */
-export const HEAVY_TYPES = new Set(['g.watch', 'room.loadout', 'room.ownership', 'room.diy', 'room.spectate']);
+export const HEAVY_TYPES = new Set(['g.watch', 'room.loadout', 'room.ownership', 'room.diy', 'room.spectate', 'room.setPlugins', 'room.skins']);
 
 /** Close codes (see header). */
 export const CLOSE = Object.freeze({ REPLACED: 4001, HELLO_TIMEOUT: 4002, POLICY: 1008, SHUTDOWN: 1001 });
+
+/**
+ * server/accounts.js 的错误码 → 协议错误码。**只有列在这里的**才把 code 作为 detail 回给客户端；
+ * 没列的（`STORE` / `NO_ACCOUNT` 这些）一律折成 INTERNAL 且不带 detail ——
+ * 它们的信息里可能含文件路径，不该出现在客户端的错误提示里。
+ */
+const ACCOUNT_ERR = Object.freeze({
+  NAME_TAKEN: ERR.NAME_TAKEN,
+  BAD_NAME: ERR.BAD_NAME,
+  BAD_CREDENTIALS: ERR.BAD_CREDENTIALS,
+  BAD_PASSWORD: ERR.BAD_PASSWORD,
+  NO_PASSWORD: ERR.NO_PASSWORD,
+  // 账号面板 / 密码重置里**可以**告诉玩家的：都是「他自己的账号」的状态，不含任何文件信息
+  NO_ACCOUNT: ERR.NO_ACCOUNT,
+  RESET_PENDING: ERR.RESET_PENDING,
+  RESET_BAD_CODE: ERR.RESET_BAD_CODE,
+  RESET_EXPIRED: ERR.RESET_EXPIRED,
+});
 
 const WS_OPEN = 1;
 const MAX_RID = 2 ** 31;
@@ -83,11 +107,23 @@ const noopLog = { info() {}, warn() {}, error() {}, debug() {} };
 /** One logical player identity; survives socket reconnects for the reconnect window. */
 export class Session {
   /**
-   * @param {{ playerId: string, token: string, name: string, now?: number }} init
+   * @param {{ playerId: string, token: string, name: string, accountId?: string | null, now?: number }} init
    */
-  constructor({ playerId, token, name, now = Date.now() }) {
+  constructor({ playerId, token, name, accountId = null, now = Date.now() }) {
     /** @type {string} public id, shared with other players */
     this.playerId = playerId;
+    /**
+     * @type {string | null} the account this session belongs to (server/accounts.js) — `null` when the server runs
+     * without an account store. Set **only** from the authenticated result, never from anything the client sent
+     * directly: that is what makes 「排名归到谁头上」 unforgeable (session.accountId → leaderboard rows).
+     */
+    this.accountId = accountId;
+    /**
+     * @type {string | null} `sha256` of the device credential this session authenticated with — never the plaintext
+     * (the client keeps that). 「退出这台设备」/「踢掉其他设备」 need it to tell this session's credential apart
+     * from the account's other ones.
+     */
+    this.accountTokenHash = null;
     /** @type {string} secret 128-bit hex reconnect token (only ever sent to its owner) */
     this.token = token;
     /** @type {string} sanitized nickname */
@@ -118,6 +154,9 @@ export class Session {
     this.notOwned = null;
     /** @type {Readonly<Record<string, { charId: string, skillIndex: number, uniEquipId: string|null }>> | null} checked 自选 picks (lobby-owned, 0.2.0 自选编队) */
     this.diy = null;
+    /** @type {Readonly<Record<string, string>> | null} chosen operator skins (lobby-owned, docs/SKINS.md): keyed by
+     * charId; PUBLIC, unlike the loadout (a teammate sees your skin through Match.publicView().players[].skins) */
+    this.skins = null;
     /** @type {string} client address of the latest connection (logging) */
     this.addr = '?';
     /** @type {string | null} per-network limit key of the latest connection (null = not limited), see clientAddress */
@@ -152,15 +191,16 @@ export class SessionRegistry {
    * Create a new session with a fresh playerId and token. Evicts the oldest idle (disconnected, roomless)
    * session when the registry is full. Returns null when full of active sessions.
    * @param {string} name
+   * @param {string | null} [accountId] the authenticated account (server/accounts.js) — see Session.accountId
    * @returns {Session | null}
    */
-  create(name) {
+  create(name, accountId = null) {
     if (this.byPlayerId.size >= this.maxSessions && !this.evictOne()) return null;
     let playerId;
     do playerId = 'p_' + randomBytes(5).toString('hex'); while (this.byPlayerId.has(playerId));
     let token;
     do token = newToken(); while (this.byTokenMap.has(token));
-    const s = new Session({ playerId, token, name, now: this.now() });
+    const s = new Session({ playerId, token, name, accountId, now: this.now() });
     this.byPlayerId.set(playerId, s);
     this.byTokenMap.set(token, s);
     return s;
@@ -515,12 +555,18 @@ export class Network {
    *   options?: Partial<typeof NET_DEFAULTS>,
    * }} opts
    */
-  constructor({ registry, handler, log = noopLog, now = Date.now, options = {} }) {
+  constructor({ registry, handler, log = noopLog, now = Date.now, options = {}, accounts = null }) {
     this.registry = registry;
     this.handler = handler;
     this.log = log;
     this.now = now;
     this.opts = { ...NET_DEFAULTS, ...options };
+    /**
+     * @type {import('./accounts.js').Accounts | null}
+     * 账号库（`null` = 不启用账号系统，行为与加账号之前完全一致 —— 测试就是这么用的）。
+     * **只有它**会决定 `session.accountId`：排行榜的归属全从这里来，客户端自报的任何 ID 都不参与。
+     */
+    this.accounts = accounts;
     /** @type {Map<import('ws').WebSocket, Connection>} */
     this.conns = new Map();
     /** @type {Map<string, number>} open sockets per client network key */
@@ -612,6 +658,12 @@ export class Network {
     }
     if (msg.t === 'hello') { this.onHelloMsg(conn, msg, now); return; }
     if (!conn.session) { this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'hello required')); return; }
+    // 账号消息在 net 层处理（账号属于会话身份，不属于房间）—— 见 onSetPasswordMsg 与下面的账号面板消息
+    if (msg.t === 'account.setPassword') { this.onSetPasswordMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.info') { this.onAccountInfoMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.logout') { this.onAccountLogoutMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.revokeOthers') { this.onAccountRevokeOthersMsg(conn, msg, rid); return; }
+    if (msg.t === 'account.rename') { this.onAccountRenameMsg(conn, msg, rid); return; }
     if (HEAVY_TYPES.has(msg.t) && !conn.heavy.take(now)) { this.reply(conn, errorMsg(ERR.RATE, rid, `${msg.t} too often`)); return; }
 
     let res;
@@ -624,6 +676,25 @@ export class Network {
       this.log.error(`[net] handler crashed on ${msg.t}`, e);
       res = { error: ERR.INTERNAL };
     }
+    if (res && typeof res.then === 'function') {
+      // an answer that has to wait (DESIGN §32.6: a room whose match runs in a match host worker answers once the worker
+      // has — server/lobby.js keeps each such room's messages in order): sent when it settles; a rejection is INTERNAL.
+      // A vanilla room never answers this way, so its replies go out exactly as before
+      Promise.resolve(res).then((r) => this.answer(conn, msg, rid, r), (e) => {
+        this.log.error(`[net] handler failed on ${msg.t}`, e);
+        this.answer(conn, msg, rid, { error: ERR.INTERNAL });
+      });
+      return;
+    }
+    this.answer(conn, msg, rid, res);
+  }
+
+  /**
+   * The direct reply to a handled message: `error` (with the ERR code) or `ok` when the request carried a rid. Never
+   * throws (a socket closed meanwhile simply gets nothing).
+   * @param {Connection} conn @param {any} msg @param {unknown} rid @param {any} res the handler's result
+   */
+  answer(conn, msg, rid, res) {
     if (res && res.error) {
       // fire-and-forget battle progress (no rid) that reached no running match — the match just ended, the room went
       // back to the lobby — is stale, not a client mistake: never answered (DESIGN §14; a rid-less error frame would
@@ -640,12 +711,17 @@ export class Network {
       this.reply(conn, errorMsg(ERR.BAD_MSG, rid, `version mismatch: server ${PROTOCOL_VERSION}`));
       return;
     }
-    const name = sanitizeName(msg.name);
+    let name = sanitizeName(msg.name);
     if (!name) { this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'bad field name')); return; }
 
     let session = conn.session;
     let resumed = false;
     const repeat = !!session;
+    /** @type {string | null} 本次新签发的设备凭证（有值就必须回给客户端存下来） */
+    let issuedToken = null;
+    let accountNew = false;
+    /** @type {boolean | null} 账号当前有没有密码（welcome.accountHasPassword：客户端据此显示「设置/修改密码」） */
+    let accountHasPassword = null;
     if (!session) {
       session = msg.token ? this.registry.byToken(msg.token) : null;
       if (session) {
@@ -657,7 +733,14 @@ export class Network {
         resumed = true;
         if (session.ws && session.ws !== conn.ws) this.detachReplaced(session.ws);
       } else {
-        session = this.registry.create(name);
+        // 只有**新建 session** 才需要认人 —— 恢复已有 session 时它是谁早就定了，
+        // 再拿客户端这次带来的东西重新判定反而会开出一个"改个字段就换人"的口子。
+        const auth = this.authenticateHello(msg, name);
+        if (auth.error) { this.reply(conn, errorMsg(auth.error, rid, auth.detail)); return; }
+        name = auth.name;
+        issuedToken = auth.token;
+        accountNew = auth.created;
+        session = this.registry.create(name, auth.accountId);
         if (!session) { this.reply(conn, errorMsg(ERR.INTERNAL, rid, 'server full')); return; }
       }
       conn.session = session;
@@ -666,20 +749,185 @@ export class Network {
       session.claimAt = Number.isFinite(msg.claimAt) ? msg.claimAt : null;
       session.disconnectedAt = null;
     }
+    // 名字以**账号**为准：有账号时，客户端在代号输入框里填什么都不能改变他是谁。
+    // （不然「输入别人的名字」就等于「变成别人」——正是这个系统要挡的事。）改名走 accounts.rename。
+    if (this.accounts && session.accountId) {
+      const rec = this.accounts.byAccountId(session.accountId);
+      if (rec) { name = rec.name; accountHasPassword = !!rec.password; }
+      // 账号在库里已经不存在了（管理员手工清过库）：降级成无账号 session，
+      // 而不是让它继续对外声称一个不存在的 accountId —— 那会让排行榜写进一个孤儿 id。
+      else session.accountId = null;
+    }
     session.name = name;
     session.lastSeen = now;
     session.addr = conn.ip;
     session.limitKey = conn.key;
 
+    // 这次握手用的是哪张设备凭证：服务端新签发的，或客户端自己带来的那张。会话只留哈希（明文在客户端）。
+    // 「退出这台设备」= 撤销这一张；「踢掉其他设备」= 撤掉其余的，都靠它区分。
+    if (this.accounts && session.accountId) {
+      const used = issuedToken || (typeof msg.accountToken === 'string' && msg.accountToken ? msg.accountToken : null);
+      if (used) session.accountTokenHash = tokenHash(used);
+    }
+
     let extra = null;
     try { extra = this.handler.welcomeInfo?.() ?? null; } catch (e) { this.log.error('[net] welcomeInfo crashed', e); }
     const welcome = { ...(extra && typeof extra === 'object' ? extra : null), t: 'welcome', playerId: session.playerId, token: session.token, name: session.name, serverNow: now, version: PROTOCOL_VERSION, resumed };
+    if (session.accountId) welcome.accountId = session.accountId;
+    if (accountHasPassword != null) welcome.accountHasPassword = accountHasPassword;
+    if (issuedToken) {
+      welcome.accountToken = issuedToken;              // 只在签发的那一次回给客户端
+      if (accountNew) welcome.accountNew = true;       // 用来让客户端说一句「账号已创建」
+    }
     if (validRid(rid)) welcome.rid = rid;
     this.reply(conn, welcome);
     try {
       this.handler.onHello?.(session, { resumed, repeat });
     } catch (e) {
       this.log.error('[net] onHello crashed', e);
+    }
+  }
+
+  /**
+   * 账号认证 —— 只在**新建 session** 时调用。
+   * 返回 `{ error }` 时调用方要回一个 error 帧并中止握手；否则 `token` 非 null 表示服务端新签发了凭证。
+   * @param {any} msg the hello frame
+   * @param {string} name 已经过 sanitizeName 的代号
+   * @returns {{ error: string, detail?: string } | { accountId: string | null, name: string, token: string | null, created: boolean }}
+   */
+  authenticateHello(msg, name) {
+    if (!this.accounts) return { accountId: null, name, token: null, created: false };
+    let auth;
+    try {
+      auth = this.accounts.authenticate({
+        name,
+        token: typeof msg.accountToken === 'string' ? msg.accountToken : null,
+        password: typeof msg.accountPassword === 'string' ? msg.accountPassword : null,
+      });
+    } catch (e) {
+      const code = ACCOUNT_ERR[e?.code];
+      if (code) return { error: code, detail: e.code };
+      this.log.error('[net] account store error', e);  // 不回 detail：里面可能有文件路径
+      return { error: ERR.INTERNAL };
+    }
+    return { accountId: auth.account.id, name: auth.account.name, token: auth.token, created: auth.created };
+  }
+
+  /**
+   * 账号消息的公共门槛：有账号库、有会话、会话已经落在某个账号上。
+   * 不满足时**已经回过错误帧**，返回 null，调用方直接 return。
+   * @param {Connection} conn @param {unknown} rid
+   * @returns {any | null} the session
+   */
+  accountSessionFor(conn, rid) {
+    const session = conn.session;
+    if (!this.accounts || !session || !session.accountId) {
+      // 服务端没开账号系统，或这个会话没有账号（无账号会话没有「自己的账号」可言）
+      this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'no account on this session'));
+      return null;
+    }
+    return session;
+  }
+
+  /**
+   * 账号消息的错误回复。**只有 ACCOUNT_ERR 里列出的码**才把 detail 回给客户端；
+   * 其余（STORE 等）可能带文件路径，一律折成 INTERNAL 且不带 detail。
+   */
+  replyAccountError(conn, e, rid) {
+    const code = ACCOUNT_ERR[e?.code];
+    if (code) { this.reply(conn, errorMsg(code, rid, e.code)); return; }
+    this.log.error('[net] account store error', e);
+    this.reply(conn, errorMsg(ERR.INTERNAL, rid));
+  }
+
+  /** `ok`（合法的 rid 才带）+ 账号快照 —— 客户端 `net.request` 拿到它之后刷新账号面板。 */
+  replyAccountOk(conn, rid, account) {
+    const ok = { t: 'ok' };
+    if (validRid(rid)) ok.rid = rid;
+    if (account) ok.account = account;
+    this.reply(conn, ok);
+  }
+
+  /**
+   * `account.setPassword` —— 给**当前会话**的账号设置 / 更换密码。
+   *
+   * 身份只看 `session.accountId`（服务端从凭证 / 密码裁定出来的），消息里没有、也不接受任何名字或 id ——
+   * 所以这条路永远改的是「你自己」的账号，不存在「改别人的密码」。密码只是备用钥匙：
+   * 设 / 改密码**不动任何设备凭证**，老设备不该因为新设备设了密码就被踢下线。
+   * 账号**已经有密码**时必须带 `oldPassword`（见 accounts.setPassword：没有它，拿到设备凭证的人能改掉密码把主人锁在门外）。
+   * @param {Connection} conn @param {{ password: string, oldPassword?: string }} msg @param {unknown} rid
+   */
+  onSetPasswordMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      this.accounts.setPassword(session.accountId, msg.password, { oldPassword: msg.oldPassword ?? null });
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
+  }
+
+  /** `account.info` —— 账号面板的初始状态（代号 / 设备数 / 有没有密码 / 注册时间）。 */
+  onAccountInfoMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
+  }
+
+  /**
+   * `account.logout` —— 「退出这台设备」：撤销**当前会话**这张设备凭证。
+   * 会话本身不断线（他仍然是这个人，只是这张凭证作废了）；下次开浏览器得用密码或重置码回来。
+   * 客户端收到 `ok` 后要自己抹掉 localStorage 里的凭证（服务端已经把哈希删了）。
+   */
+  onAccountLogoutMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    if (!session.accountTokenHash) {
+      this.reply(conn, errorMsg(ERR.BAD_MSG, rid, 'no device credential on this session'));
+      return;
+    }
+    try {
+      this.accounts.revokeTokenHash(session.accountTokenHash);
+      session.accountTokenHash = null;
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
+  }
+
+  /**
+   * `account.revokeOthers` —— 怀疑号被别人上了：撤掉**除当前这台以外**的全部设备凭证。
+   * 密码不变；撤销之后别人手里的旧凭证立刻失效，只能靠密码或重置码重新进来。
+   */
+  onAccountRevokeOthersMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      this.accounts.revokeAllTokens(session.accountId, { exceptHash: session.accountTokenHash });
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
+    }
+  }
+
+  /**
+   * `account.rename` —— 改代号。`accountId` 不变 ⇒ 历史成绩不会分裂。
+   * 账号有密码时要带 `password`（名字在榜上是公开的，改名的风险是冒充别人）。
+   */
+  onAccountRenameMsg(conn, msg, rid) {
+    const session = this.accountSessionFor(conn, rid);
+    if (!session) return;
+    try {
+      const rec = this.accounts.rename(session.accountId, msg.name, { password: msg.password ?? null });
+      session.name = rec.name;
+      this.replyAccountOk(conn, rid, this.accounts.info(session.accountId));
+    } catch (e) {
+      this.replyAccountError(conn, e, rid);
     }
   }
 

@@ -9,14 +9,27 @@
 // Backdrop art: if data/assets.json lists a UI backdrop (`ui.titleBackdrop`, or one of the
 // entry/loading illustration names) it is layered under the CSS art; otherwise the screen is
 // pure CSS/SVG (radar, ridgelines, glow), so it never issues a request that can 404.
+//
+// The full art, under the login box: 下载完整素材 (ui/assetDownload.js — its dialog downloads from this server) and
+// 导入素材包 (ui/assetImport.js — the player's own folder or zip, no server download) side by side, so an import never
+// opens the download (docs/history/0.3.0.md §32.14.39).
+//
+// Plugins (DESIGN §32 P1a, the design study's §7.4): when the server has unofficial plugins (content.plugins of /healthz or
+// welcome — content.js installedCount), the footer says 「本服务器安装了 N 个插件」 — a button that loads the list
+// (ui/pluginPanel.js InstalledPlugins, which fetches the catalogue when it opens); nothing on a server without any, which
+// the page never asks for its catalogue — and the title page loads none of the panel's code.
 
 import { ResumeMatchButton } from '../ui/resumeMatch.js';
-import { useMemo, useState } from '../../vendor/hooks.module.js';
+import { AssetDownloadButton } from '../ui/assetDownload.js';
+import { AssetImportButton } from '../ui/assetImport.js';
+import { AccountPanel, ForgotPasswordPanel } from '../ui/account.js';
+import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { NAME_MAX_LEN, APP_VERSION, DEV_BUILD } from '../../../shared/constants.js';
 import { html, Button, Icon, MicroLabel, TextField, PingPill } from '../ui/components.js';
 import { GuideButton } from '../ui/guide.js';
 import { openStats } from './stats.js';
-import { toast } from '../ui/toasts.js';
+import { openRanks } from './ranks.js';
+import { toast, toastError } from '../ui/toasts.js';
 import { net, identity } from '../net.js';
 import { store, useStore, shallowEqual } from '../store.js';
 import { data, useData } from '../data.js';
@@ -26,49 +39,11 @@ import { t, N_ } from '../../../shared/i18n.js';
 import { scriptOf } from '../../../shared/i18nPacks.js';
 import { GIcon } from '../ui/gameComponents.js';
 import { SettingsModal } from '../ui/settings.js';
+import { installedCount } from '../content.js';
+import { NoticesButton } from '../ui/notices.js';
+import { sanitizeName, isValidName } from '../ui/playerName.js';
 
-// Same character classes as server/net.js sanitizeName (control, zero-width, bidi, BOM), so a name
-// the client accepts is never rejected by the server's hello validation.
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g;
-// Lone surrogates are removed by a scan, not a regex: the lookbehind such a regex needs is a *syntax error* in Safari
-// < 16.4, which would stop the whole client from loading there.
-export function stripLoneSurrogates(str) {
-  let out = '';
-  for (let i = 0; i < str.length; i++) {
-    const c = str.charCodeAt(i);
-    if (c >= 0xd800 && c <= 0xdbff) {
-      const n = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
-      if (n >= 0xdc00 && n <= 0xdfff) { out += str[i] + str[i + 1]; i++; }
-      continue;
-    }
-    if (c >= 0xdc00 && c <= 0xdfff) continue;
-    out += str[i];
-  }
-  return out;
-}
-
-/**
- * Normalise a nickname like the server does (NFC, strip lone surrogates / control / invisible /
- * bidi characters, collapse whitespace, trim), then clamp to NAME_MAX_LEN UTF-16 code units — the
- * protocol's `hello.name` limit — without splitting a surrogate pair.
- * @param {any} raw
- * @returns {string}
- */
-export function sanitizeName(raw) {
-  let s = String(raw ?? '');
-  try { s = s.normalize('NFC'); } catch { /* keep as is */ }
-  s = stripLoneSurrogates(s).replace(/\s+/g, ' ').replace(CONTROL_CHARS, '').replace(/ {2,}/g, ' ').trim();
-  if (s.length > NAME_MAX_LEN) {
-    s = s.slice(0, NAME_MAX_LEN);
-    // Don't leave half a surrogate pair at the end.
-    if (/[\ud800-\udbff]$/.test(s)) s = s.slice(0, -1);
-    s = s.trim();
-  }
-  return s;
-}
-
-/** @param {any} raw @returns {boolean} */
-export const isValidName = (raw) => sanitizeName(raw).length > 0;
+export { stripLoneSurrogates, sanitizeName, isValidName } from '../ui/playerName.js';
 
 /**
  * Enter the game shell with a nickname (title → lobby).
@@ -192,8 +167,35 @@ export function TitleScreen() {
   const conn = useStore((s) => s.connection, shallowEqual);
   const pendingJoin = useStore((s) => s.ui.pendingJoin);
   useLang(); // re-render on a language switch
-  const [name, setName] = useState(() => store.get().me.name || identity.loadName() || '');
+  const currentName = useStore((s) => s.me.name);
+  const [name, setName] = useState(() => currentName || identity.loadName() || '');
+  // An import may restore the current name while this screen remains behind the stats overlay.
+  useEffect(() => {
+    if (currentName) setName((draft) => draft || currentName);
+  }, [currentName]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 账号（server/accounts.js）：密码用于「换设备 / 清了浏览器数据后把账号找回来」。
+  // 平时根本不出现 —— 只有服务端拒绝握手（代号被占、密码错）或玩家自己点「用密码登录」才展开。
+  const [password, setPassword] = useState('');
+  const [askPassword, setAskPassword] = useState(false);
+  // 「设置 / 修改密码」：给**当前账号**补一把备用钥匙（设备凭证丢了时靠「代号 + 密码」找回）。
+  // 只有已经带着账号在线（welcome.accountId）才出现 —— 注册时没设密码的账号从此有了补救入口。
+  const [pwSetOpen, setPwSetOpen] = useState(false);
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  // 已发出 hello、正在等结果。**失败之前不让玩家进大厅** —— 不然他会在里面看到「未连接」却不知道为什么。
+  const [pending, setPending] = useState(false);
+  const errAtStart = useRef(null);
+  // 账号面板（ui/account.js）：状态 / 改密码 / 改代号 / 退出这台设备 / 踢掉其他设备
+  const [accountOpen, setAccountOpen] = useState(false);
+  // 「忘记密码」：申请 → 报码给服主 → 批准后设新密码（ui/account.js ForgotPasswordPanel）
+  const [forgotOpen, setForgotOpen] = useState(false);
+  // the list of the server's plugins once loaded (ui/pluginPanel.js — a component in state: set through an updater)
+  const [Installed, setInstalled] = useState(null);
+  const openPlugins = () => {
+    import('../ui/pluginPanel.js').then((m) => setInstalled(() => m.InstalledPlugins), (err) => console.warn('[plugins] the list did not load', err));
+  };
+  const installed = useStore(installedCount);
   const assetsSettled = useData('assets');
   const assets = data.get('assets');
   const backdrop = findUiAsset(assets, BACKDROP_KEYS);
@@ -209,10 +211,71 @@ export function TitleScreen() {
   const cssRidges = assetsSettled && (!ridges || ridgesFailed);
 
   const valid = isValidName(name);
+  const acctError = conn.lastError?.code || null;
+  const nameTaken = acctError === 'NAME_TAKEN';
+  const badCredentials = acctError === 'BAD_CREDENTIALS';
+  // 「这个代号没设过密码」：继续显示密码框只会让人一遍遍试错 —— 密码不存在，
+  // 试多少次都是 BAD_CREDENTIALS。改成收起密码框 + 给一条出路（换代号 / 回原浏览器）。
+  const noPassword = acctError === 'NO_PASSWORD';
+  // 服务端说「这个代号有人了」或「密码不对」⇒ 展开密码输入框（那是唯一的自救方式）
+  const passwordMode = askPassword || nameTaken || badCredentials;
+  // 已经带着账号在线（welcome 回了 accountId）才谈得上「给这个账号设密码」
+  const hasAccount = conn.status === 'online' && !!net.accountId;
+
+  /** 给当前账号设置 / 更换密码（account.setPassword）：身份由服务端裁定，改的永远是"自己"的账号。 */
+  const submitSetPassword = () => {
+    if (pwNew.length < 6) { toast(t('密码至少 6 位'), 'warn'); return; }
+    if (pwNew !== pwConfirm) { toast(t('两次输入的密码不一致'), 'warn'); return; }
+    net.request('account.setPassword', { password: pwNew }).then(() => {
+      net.accountHasPassword = true;
+      setPwSetOpen(false);
+      setPwNew('');
+      setPwConfirm('');
+      toast(t('密码已设置 —— 换设备时用「代号 + 密码」即可找回账号'), 'success');
+    }).catch((err) => toastError(err));
+  };
+
+  /** 从「这个代号没密码」的死角里退出来：清掉本地凭证，重新以新代号开始。 */
+  const resetAccount = () => {
+    identity.forgetAccount?.();
+    net.clearPassword?.();
+    setPassword('');
+    setAskPassword(false);
+    errAtStart.current = null;
+    // 走 net.clearError() 而不是直接赋值 lastError：直接赋值不 emit，
+    // 订阅 store 的组件不会重渲染，提示条会一直挂在屏幕上。
+    net.clearError?.();
+  };
+
   const start = () => {
     if (!valid) { toast(t('请输入博士代号'), 'warn'); return; }
-    enterSession(name);
+    // 没设过密码的账号不该再要密码 —— 直接当新代号放行（服务端会判名字被占而拒绝，
+    // 所以玩家必须真的换一个名字，而不会以为是自己密码输了）。
+    if (passwordMode && !noPassword && !password) { toast(t('请输入密码'), 'warn'); return; }
+    if (noPassword) return;                 // 按钮是「换一个代号」，不直接提交
+    identity.saveName(name);
+    // 记下点下去那一刻的错误，好把这一次握手的结果与上一次的残影区分开
+    errAtStart.current = conn.lastError?.code || null;
+    net.setName(name);
+    if (passwordMode) net.usePassword(password);
+    setPending(true);
   };
+
+  // 等这一次 hello 的结果。**成功才真的进入** —— 失败就留在标题画面，
+  // 因为错误已经写进 conn.lastError，下面的提示条会把它显示出来。
+  // （如果直接进大厅，玩家会在里面看到「未连接」却不知道为什么，也没地方改代号。）
+  useEffect(() => {
+    if (!pending) return;
+    if (conn.status === 'online') {
+      setPending(false);
+      const finalName = net.serverName || name;
+      identity.setEntered(true);
+      store.set((s) => ({ me: { ...s.me, name: finalName }, session: { ...s.session, entered: true } }));
+      return;
+    }
+    const code = conn.lastError?.code || null;
+    if (code && code !== errAtStart.current) setPending(false);
+  }, [pending, conn.status, conn.lastError]);
 
   const online = conn.status === 'online' || conn.status === 'connected';
   const dotClass = online ? 'is-on' : conn.status === 'reconnecting' || conn.status === 'connecting' || conn.status === 'handshaking' ? 'is-warn' : 'is-bad';
@@ -249,6 +312,7 @@ export function TitleScreen() {
       <div>
         <div class="title-corner__tools">
           <${Button} variant="ghost" size="sm" icon="chart" class="title-stats" onClick=${openStats} title=${t('统计数据')}>${t('统计')}<//>
+          <${Button} variant="ghost" size="sm" icon="crown" class="title-ranks" onClick=${openRanks} title=${t('全服排行榜')}>${t('排行')}<//>
           <${LangToggle} class="title-lang" />
         </div>
         <${MicroLabel} tone="hi">TARGET POINT<//><br /><${MicroLabel}>STRONGHOLD PROTOCOL<//>
@@ -269,10 +333,41 @@ export function TitleScreen() {
           <${Icon} name="key" />
           <span>${t('收到同盟邀请')}</span><b class="num">${pendingJoin}</b><span class="t-lo">${t('· 输入代号后将自动加入')}</span>
         </div>` : null}
+        ${nameTaken || badCredentials || noPassword ? html`<div class="title-invite" role="alert">
+          <${Icon} name="info" />
+          <span>${noPassword
+            ? t('这个代号没有设过密码 —— 输多少次都不对。请在当初注册的那个浏览器里打开（凭证只存在那里），或者换一个代号。')
+            : nameTaken
+              ? t('这个代号已经有人用了 —— 如果那是你，用密码登录；否则换一个。')
+              : t('密码不正确')}</span>
+        </div>` : null}
         <${TextField} label=${t('博士代号')} micro="CALLSIGN" size="lg" icon="user" value=${name} maxLength=${NAME_MAX_LEN}
           placeholder=${t('输入你的代号（最多 {NAME_MAX_LEN} 字）', { NAME_MAX_LEN })} autoFocus=${!touchUi}
           onInput=${setName} onEnter=${start} />
-        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons" disabled=${!valid} onClick=${start}>${t('开始')}<//>
+        ${passwordMode && !noPassword ? html`<${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"
+          value=${password} maxLength=${128} onInput=${setPassword} onEnter=${start} />` : null}
+        ${noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${resetAccount}>
+          ${t('换一个代号')}</button>` : null}
+        <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons"
+          disabled=${!valid || pending || (passwordMode && !noPassword && !password)} onClick=${start}>
+          ${noPassword ? t('开始') : passwordMode ? t('用密码登录') : t('开始')}<//>
+        ${!passwordMode && valid ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAskPassword(true)}>
+          ${t('换设备了？用密码登录')}</button>` : null}
+        ${(passwordMode && !noPassword) || noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setForgotOpen(true)}>
+          ${noPassword ? t('忘记密码？申请重置') : t('忘记密码？')}</button>` : null}
+        ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAccountOpen(true)}>
+          ${t('账号')}</button>` : null}
+        ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setPwSetOpen(!pwSetOpen)}>
+          ${net.accountHasPassword ? t('修改密码') : t('设置密码')}</button>` : null}
+        ${pwSetOpen && hasAccount && !passwordMode ? html`<div class="title-pwset">
+          <p class="title-pwset__hint t-lo">${t('设置密码后，换设备或清了浏览器数据时，可用「代号 + 密码」找回账号。')}</p>
+          <${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"
+            value=${pwNew} maxLength=${128} onInput=${setPwNew} onEnter=${submitSetPassword} />
+          <${TextField} label=${t('确认密码')} micro="CONFIRM" size="lg" icon="key" type="password"
+            value=${pwConfirm} maxLength=${128} onInput=${setPwConfirm} onEnter=${submitSetPassword} />
+          <${Button} variant="primary" size="lg" block=${true} disabled=${!pwNew || !pwConfirm} onClick=${submitSetPassword}>
+            ${net.accountHasPassword ? t('修改密码') : t('设置密码')}<//>
+        </div>` : null}
         <div class="title-conn">
           <span class=${`status-dot ${dotClass}`}></span>
           <span>${STATUS_TEXT[conn.status] ? t(STATUS_TEXT[conn.status]) : conn.status}</span>
@@ -283,13 +378,29 @@ export function TitleScreen() {
           <${FullscreenButton} class="title-fs" />
         </div>
       </div>
+      <div class="title-assets">
+        <${AssetDownloadButton} />
+        <${AssetImportButton} />
+      </div>
     </main>
 
     <${SettingsModal} open=${settingsOpen} onClose=${() => setSettingsOpen(false)} />
+    <${AccountPanel} open=${accountOpen} onClose=${() => setAccountOpen(false)} onRenamed=${(n) => setName(n)} />
+    <${ForgotPasswordPanel} open=${forgotOpen} initialName=${name} onClose=${() => setForgotOpen(false)}
+      onDone=${(n) => {
+        // 重置成功后客户端已经拿到新凭证（identity.saveAccountToken），这里只把界面恢复成「可以正常开始」的样子
+        setName(n);
+        net.clearError?.();
+        errAtStart.current = null;
+      }} />
+    ${Installed ? html`<${Installed} open=${true} onClose=${() => setInstalled(null)} />` : null}
 
     <footer class="title-foot">
       <${ResumeMatchButton} />
       <${PwaInstallButton} />
+      <${NoticesButton} />
+      ${installed ? html`<button type="button" class="title-plugins" data-testid="title-plugins" onClick=${openPlugins}>
+        <${Icon} name="info" />${t('本服务器安装了 {n} 个插件', { n: installed })}</button>` : null}
       <span>${t('非官方同人复刻 · 游戏素材版权归 上海鹰角网络 / Yostar 所有')}</span>
       <span class="title-foot__meta">
         <a class="title-repo" href="https://github.com/sganggs/Stronghold-Protocol" target="_blank" rel="noopener noreferrer">${t('项目仓库')}</a>
