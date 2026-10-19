@@ -53,8 +53,27 @@ import { ScreenFitSection } from './screenFit.js';
 import { askPersistStorage, importSupport, storagePersisted } from '../assetCache.js';
 import { assetImport, pruneImportedAssets } from '../assetPack.js';
 import { cosmetics } from '../cosmetics.js';
+import { net } from '../net.js';
+import { AccountPanel } from './account.js';
 
 const cx = (...p) => p.flat().filter(Boolean).join(' ');
+
+/**
+ * 账号（DESIGN §35.8）：设置里的入口。
+ *
+ * 为什么挂在设置里而不是只挂在标题画面：登录成功后会直接进大厅（main.js 的 session.entered），
+ * 标题画面上的「账号」按钮对老玩家几乎是个瞬态 —— 设置是从大厅、房间、对局里都点得到的那个入口。
+ * 没有账号的会话（服务端没开账号系统 / 无账号）整行不出现。
+ */
+function AccountSection() {
+  const [open, setOpen] = useState(false);
+  if (!net.accountId) return null;
+  return html`<div class="set-row" data-testid="account-row">
+    <span class="set-row__label">${t('账号')}<${MicroLabel}>ACCOUNT<//></span>
+    <${Button} variant="secondary" size="sm" icon="user" onClick=${() => setOpen(true)}>${t('管理账号')}<//>
+    <${AccountPanel} open=${open} onClose=${() => setOpen(false)} />
+  </div>`;
+}
 
 /** Settings store: { bgm, sfx, voice, voiceLang, voiceNative, voiceOverrides, muted, damageNumbers, officialDamageNumbers, ammoEnergyCount, combatMetrics, prepDeployFold, quality, textSize, keys }. */
 export const settingsStore = createStore(sanitizeSettings(loadPref('settings', null)));
@@ -532,6 +551,7 @@ export function SettingsModal({ open, onClose }) {
       <${HotkeySection} keys=${s.keys} touchUi=${touchUi} />
       <${CosmeticSection} />
       <${UiPluginSection} />
+      <${AccountSection} />
       <${StorageSection} />
       <${DiagSection} />
       <p class="set-hint">${touchUi ? t('触屏操作：点击单位选中（撤退 / 出售）· 长按单位或卡牌查看详情 · 拖动部署后滑动选择朝向') : t('右键查看详情')}</p>

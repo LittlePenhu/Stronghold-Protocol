@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const ACC = readFileSync(path.join(ROOT, 'public/js/ui/account.js'), 'utf8');
 const TITLE = readFileSync(path.join(ROOT, 'public/js/screens/title.js'), 'utf8');
+const SETTINGS = readFileSync(path.join(ROOT, 'public/js/ui/settings.js'), 'utf8');
 const EN = JSON.parse(readFileSync(path.join(ROOT, 'public/i18n/en.json'), 'utf8'));
 
 test('面板的四条 WS 消息就是 server/net.js 处理的那四个，不多不少', () => {
@@ -52,6 +53,14 @@ test('title.js 把两块面板挂上，且入口只在合适的时机出现', ()
   assert.match(TITLE, /<\$\{ForgotPasswordPanel\} open=\$\{forgotOpen\}/, '忘记密码面板挂在标题画面');
   assert.match(TITLE, /onClick=\$\{\(\) => setForgotOpen\(true\)\}/, '有「忘记密码」入口');
   assert.match(TITLE, /onDone=\$\{\(n\) => \{/, '重置完成后回填代号');
+});
+
+test('设置里也有入口 —— 登录后直接进大厅，标题画面的「账号」按钮基本点不到', () => {
+  assert.match(SETTINGS, /import \{ AccountPanel \} from '\.\/account\.js'/, '设置复用同一块面板');
+  assert.match(SETTINGS, /function AccountSection\(\)/, '设置里的账号段');
+  assert.match(SETTINGS, /if \(!net\.accountId\) return null/, '没有账号的会话整行不出现');
+  assert.match(SETTINGS, /<\$\{AccountSection\} \/>/, '挂进设置列表');
+  assert.equal(Object.hasOwn(EN, '管理账号'), true, 'en.json: 管理账号');
 });
 
 test('en.json 有全部新增文案的英文（不含汉字、非空）', () => {
