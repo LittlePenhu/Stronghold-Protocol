@@ -613,7 +613,10 @@ test('test join and watch require acknowledgement before any seat or private sta
   const code = host.roomCode;
   for (const [s, method] of [[guest, 'join'], [watcher, 'spectate']]) {
     error(lobby[method](s, { code }), 'TEST_CONFIRM');
-    assert.equal(lobby.roomOf(s), null); assert.equal(s.messages.length, 0);
+    assert.equal(lobby.roomOf(s), null);
+    // 收件箱里只允许有大厅的房间列表快照（本 fork 的 lobby.rooms：任何不在房间里的会话都会收到）；
+    // **座位 / 私有状态一条都不能发** —— 这才是这条测试真正要守的东西。
+    assert.deepEqual(s.messages.filter((m) => m.t !== 'lobby.rooms'), [], 'ack 之前不发座位或私有状态');
     ok(lobby[method](s, { code, testAck: true }));
     assert.equal(s.messages.at(-1).test, true);
   }

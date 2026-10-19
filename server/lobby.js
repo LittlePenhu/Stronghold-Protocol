@@ -1393,7 +1393,8 @@ export class Lobby {
     if (this.testEnabled === true) info.testMode = true;
     // 实时在线房间列表（lobby.rooms）：每个 hello 都带一份快照，所以大厅一进去就有东西可点，
     // 不用等下一次房间变化（推送本身仍走 broadcast 的 lobby.rooms）。
-    info.rooms = this.roomList();
+    // `typeof` 是给只 stub 了 welcomeInfo 那几个字段的测试对象留的：真 Lobby 一定有 roomList。
+    info.rooms = typeof this.roomList === 'function' ? this.roomList() : [];
     return info;
   }
 
