@@ -6,6 +6,58 @@
 ![license](https://img.shields.io/badge/code%20license-GPL--3.0--or--later-blue)
 ![node](https://img.shields.io/badge/node-22%20%7C%2024-339933)
 
+## 这个仓库是什么
+
+这是 [sganggs/Stronghold-Protocol](https://github.com/sganggs/Stronghold-Protocol) 的**个人自建服 fork**：在自有服务器上跑一个带账号系统与全服排行榜的私人联机服。
+
+| 分支 | 内容 |
+|---|---|
+| `master` | 上游 0.2.5 的**原样代码**（与上游的唯一区别就是这份 README）：只用来跟上游同步 |
+| [`rankings-tab`](https://github.com/LittlePenhu/Stronghold-Protocol/tree/rankings-tab) | ★ **本服实际运行的代码**：上游 v0.3.1 + 下面列出的自研功能；线上部署跟这个分支 |
+
+想玩原版、看上游文档或提通用 Issue，请去上游仓库；这个 fork 只维护自己服务器相关的改动。
+
+## 比上游多做了什么（都在 `rankings-tab`）
+
+### 账号系统
+
+存在的唯一理由是**防串号 + 让全服排行榜知道成绩属于谁**。
+
+- **身份只由服务端裁定**：`accountId` 由服务端生成（CSPRNG），客户端从不自报。
+- **代号不是密码**：代号是公开的（要显示在榜上），只用来「找」账号；进得来靠 ①设备凭证 ②密码 ③重置码。名字被占又没有这三样 ⇒ `NAME_TAKEN`。
+- 设备凭证 128 位随机，库里只存 `sha256`；一个账号最多 8 张（超出淘汰最旧）；密码用 `scrypt`。设/改密码**不**动已有凭证。
+- **改密码要旧密码**（否则拿到设备凭证的人能把主人锁在门外）；**改名不换 `accountId`**，历史成绩不分裂；可以「退出这台设备」「踢掉其他设备」。
+- 错误码分档（`NAME_TAKEN` / `BAD_CREDENTIALS` / `NO_PASSWORD` / `BAD_PASSWORD` / `BAD_NAME` …），前端文案按错误码分支。
+
+### 密码重置（服主批准制）
+
+玩家忘了密码、又丢了设备凭证时，除了「服主点头」没有别的可信凭据，所以流程刻意分成两段，让**玩家手里的码**和**服主的判断**各管一半：
+
+1. 玩家在标题画面「忘记密码」填代号 → 服务端发 8 位码（库里只存 `sha256`，7 天有效；重新申请会覆盖旧码）。
+2. 玩家把码报给服主 → 服主在服务器上批准（`POST /admin/resets/approve`；该接口只在**回环 / 宿主机 docker 网关 + 正确 token** 时存在，公网访问一律 404）。
+3. 玩家回到「忘记密码」填同一个码 + 新密码 → 服务端设密码、**撤销该账号全部旧设备凭证**、签发一张新凭证。
+
+申请不验证身份（否则又回到「没凭证进不来」的死路），**批准才是闸**，没批准时连「码对不对」都不回答；申请限流；来源只看原始连接地址，**不看 `X-Forwarded-For`**（否则公网加个头就能装成本机）。
+
+### 全服排行榜
+
+- `server/leaderboard.js` 按账号累计成绩，唯一对外读接口是 **`GET /leaderboard`**：只返回聚合榜单，没有「按 id 查任意玩家明细」的入口。
+- 口径：**谁参加了**取自服务端座位表（`room.seats → playerId → session.accountId`），**哪些局存在**取自服务端账本（`matchId` 幂等），客户端报什么都不参与；只有一局内的数值（伤害 / 叠层 / 干员）是客户端上报的，服务端做数值合理性钳制，页面底部如实写明。
+- 入口：标题画面「排行」、大厅顶栏「排行」、房间顶栏「排行」、统计 →「排行」→「查看全服排行榜」（没玩过也能看）。
+
+### 大厅实时房间列表
+
+大厅直接显示当前在玩的房间（模式、难度、人数、阶段），不用每次都靠房主把密钥发出来。
+
+### 工程侧
+
+- **首屏 preload**：`tools/preload.mjs` 从入口的静态导入图（164 个模块）生成 `modulepreload`；页面是无打包的 ES module 图，否则浏览器要逐层发现、首屏多等好几轮往返。
+- **WebGL 上下文恢复**：2D 战场在上下文丢失时暂停帧、恢复后继续（PIXI 7 自己恢复 GL 对象）；3D 棋盘丢失时立刻退回 2D，并用新画布 + 新上下文重建。
+- **`/healthz` 进程指标**：内存（RSS / heap / external）与事件循环延迟直方图 —— 服务端跑战斗都在同一条线程上按 8 ms 时间片推进，延迟变大就是「卡顿」的量化信号。
+- **测试**：黄金结果（固定种子的整套战斗与对局摘要）默认跑全量；`npm test` 在 Ubuntu / Windows × Node 22 / 24 上跑。
+
+> 部署脚本（定时跟随分支自动部署、有玩家在线时暂缓、每日备份）跑在私人服务器上，**不在这个仓库里**；这里只放代码。
+
 ## 声明
 
 > [!IMPORTANT]
@@ -26,6 +78,7 @@ English summary: [below](#english).
 
 ## 目录
 
+- [这个仓库是什么](#这个仓库是什么) · [比上游多做了什么](#比上游多做了什么都在-rankings-tab)
 - [声明](#声明) · [简介](#简介) · [功能一览](#功能一览)
 - [快速开始](#快速开始)：[整合包](#方式一整合包推荐) · [从源码运行](#方式二从源码运行) · [系统要求](#系统要求) · [端口与配置](#端口与配置) · [局域网联机](#和朋友一起玩局域网)
 - [联机方式](#联机方式) · [操作](#操作) · [文档](#文档) · [开发与测试](#开发与测试) · [项目结构](#项目结构)
@@ -146,7 +199,7 @@ npm start          # 启动服务器：http://localhost:3000
 通用注意事项：
 
 - 游戏是**单个常驻 Node.js 进程 + WebSocket**（路径 `/ws`），只能跑一个实例，必须部署在域名根路径；Vercel 之类的 Serverless 平台和 GitHub Pages 之类的静态托管都不适用。反向代理要转发 WebSocket 升级。
-- 游戏没有账号系统，**知道地址的人都能进来**。请只把地址发给朋友，不要公开发布，也不要搭建公开大厅；这同时能降低素材版权方面的风险。
+- 上游原版没有账号系统；本 fork 的 `rankings-tab` 分支有（代号 + 密码 / 设备凭证，见[上文](#比上游多做了什么都在-rankings-tab)）。但**知道地址的人依然能注册**：请只把地址发给朋友，不要公开发布，也不要搭建公开大厅；这同时能降低素材版权方面的风险。
 - 有公网 IPv4 时也可以在路由器上做端口转发，但这会把家里的电脑直接暴露在公网上，优先考虑上面的方式。
 
 ## 操作
@@ -249,6 +302,8 @@ node tools/perfbench.mjs --cpu 1,4,6 --profile             # 真实战斗的帧�
 ## English
 
 An **unofficial, non-commercial fan remake** of Arknights' seasonal auto-chess tower-defense mode *Stronghold Protocol: Alliance*, played in the browser: solo, or 1–4 player co-op (AI teammates can fill seats). Combat is simulated in each player's browser, so a low-power PC can host.
+
+- **This fork:** a personal self-hosted fork of [sganggs/Stronghold-Protocol](https://github.com/sganggs/Stronghold-Protocol). `master` is the upstream 0.2.5 code as it is (only this README differs); the server actually runs [`rankings-tab`](https://github.com/LittlePenhu/Stronghold-Protocol/tree/rankings-tab) — upstream v0.3.1 plus accounts (server-issued identity, device tokens, scrypt passwords, rename, revoke devices), an owner-approved password reset, a server-wide leaderboard behind `GET /leaderboard`, a live room list and the ranking-tab entry points, plus a generated `modulepreload` list, 2D/3D WebGL context recovery and process figures in `/healthz`. The deployment scripts live on the private server, not in this repository.
 
 - **Run:** download the full bundle `Stronghold-Protocol-v<version>.zip` (~550 MB, all the art inside, the Chinese and Japanese operator voices and the official battlefield scenes included) from [Releases](../../releases/latest) — or the lite one, `…-lite.zip` (~22 MB), which downloads the art (~550 MB) on its first start; from 0.2.1 on, `…-update.zip` holds only the files changed since the earlier 0.2.x releases: stop the server, extract it over an existing 0.2.x folder and start again (the first start deletes the files the new version dropped and verifies the install) — install Node.js 22 or 24, then double-click `scripts\start-windows.bat` (Windows) or run `./scripts/start.sh` (macOS / Linux) and open <http://localhost:3000>. From source: `npm install && npm run setup && npm start` (setup downloads ~550 MB of art from public mirrors, the emotes and the how-to-play pages included; the official 3D board, some official HUD icons, two enemy models and 39 summon models are extracted from a local Arknights client — without one the game uses the 2D board and look-alike stand-ins (the summons show their avatars), and a server can copy `public/assets/local/` and `data/local-assets.json` from the full bundle of the same version).
 - **Languages:** Chinese (the default), English, 日本語, 한국어 and 繁體中文 — switch on the title screen or in Settings. Game texts come from the official clients; the Japanese, Korean and Traditional Chinese interface strings are machine translations (corrections welcome: [docs/I18N.md](docs/I18N.md)).
