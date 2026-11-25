@@ -425,7 +425,7 @@
 /* Narrow desktop windows keep the full descriptions (phones have their own short labels below).
    [ASSUMED] A shared two-line minimum keeps both cards level when only one description wraps. */
 @media (max-width: 900px) and (min-height: 521px) {
-  .hub-entry__group { min-height: 3em; white-space: normal; overflow: visible; text-overflow: clip; }
+  .hub-entry__group { min-height: 3.2em; line-height: 1.35; align-items: flex-end; white-space: normal; overflow: visible; text-overflow: clip; }
   .hub-entry__long { white-space: normal; overflow: visible; text-overflow: clip; }
 }
 .hub-entry {
@@ -470,45 +470,6 @@
 .hub-entry--coop .hub-entry__icon { color: rgba(4, 20, 15, .25); }
 .hub-entry--coop .hub-entry__corner { background: linear-gradient(135deg, transparent 50%, #e8fff7 50%); }
 @keyframes card-in { from { opacity: 0; transform: translateY(.14rem); } }
-
-/* ---- 实时在线房间列表 (S2C lobby.rooms) --------------------------------------------------------------- */
-.room-list-panel .panel__body { padding: .12rem .14rem; }
-.ally-card--live { padding: .12rem .16rem; }
-.ally-live__head { display: flex; align-items: center; justify-content: space-between; gap: .08rem; margin-bottom: .08rem; font-size: calc(.16 * var(--t)); font-weight: 700; color: var(--text-hi); }
-.hub-tile__badge { margin-left: auto; padding: .02rem .08rem; border-radius: 999px; font-size: calc(.14 * var(--t)); font-weight: 700; color: var(--mint-400); background: var(--mint-a20); border: 1px solid var(--mint-a35); }
-.ally-side { overflow-y: auto; overscroll-behavior: contain; }
-.room-list { display: flex; flex-direction: column; gap: .08rem; margin: 0; padding: 0; list-style: none; }
-.room-list__empty { padding: .22rem .12rem; text-align: center; font-size: calc(.15 * var(--t)); }
-.room-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: .12rem;
-  padding: .1rem .12rem;
-  border: 1px solid var(--line);
-  background: rgba(0, 0, 0, .28);
-  transition: border-color var(--t-fast), background-color var(--t-fast);
-}
-.room-row:hover { border-color: var(--line-3); background: rgba(0, 0, 0, .42); }
-.room-row.is-playing { opacity: .8; }
-.room-row__main { display: flex; flex-direction: column; gap: .02rem; min-width: 1.15rem; }
-.room-row__code { font-size: calc(.2 * var(--t)); font-weight: 900; letter-spacing: .18em; color: var(--amber); }
-.room-row__host { font-size: calc(.13 * var(--t)); }
-.room-row__meta { display: flex; flex-direction: column; gap: .02rem; }
-.room-row__mode { font-size: calc(.13 * var(--t)); color: var(--text-md); }
-.room-row__diff { font-size: calc(.14 * var(--t)); font-weight: 700; color: var(--d-color, var(--amber)); }
-.room-row__nums { display: flex; align-items: center; gap: .12rem; margin-left: auto; font-size: calc(.15 * var(--t)); color: var(--text-md); }
-.room-row__spec { display: inline-flex; align-items: center; gap: .03rem; color: var(--text-lo); }
-.room-row__spec .icon { width: .14rem; height: .14rem; }
-.room-row__status {
-  padding: .02rem .1rem;
-  border: 1px solid var(--line-2);
-  font-size: calc(.13 * var(--t));
-  color: var(--mint-400);
-}
-.room-row__status.is-playing { color: var(--amber); border-color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
-.room-row__actions { display: flex; gap: .08rem; }
-.room-row__actions .btn { height: .42rem; }
 
 /* ---- tips -------------------------------------------------------------------------------------------- */
 .tips {
@@ -1015,6 +976,46 @@ button.ally-card:disabled .ally-card__bar { filter: grayscale(.5) brightness(.8)
   transition: border-color var(--t-fast), background-color var(--t-fast);
 }
 .code-chip:hover { border-color: var(--amber); background: rgba(246, 163, 41, .08); }
+
+/* ---- 实时在线房间列表 (S2C lobby.rooms) --------------------------------------------------------------- */
+/* 放在 .ally-side / .ally-card 之后，避免 .ally-card { padding: 0 } 覆盖 .ally-card--live 内边距 */
+.hub-tile__badge { margin-left: auto; padding: .02rem .08rem; border-radius: 999px; font-size: calc(.14 * var(--t)); font-weight: 700; color: var(--mint-400); background: var(--mint-a20); border: 1px solid var(--mint-a35); }
+.ally-side { overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+.room-list-panel .panel__body { padding: .12rem .14rem; }
+.ally-card--live { padding: .14rem .18rem; }
+.ally-live__head { display: flex; align-items: center; justify-content: space-between; gap: .08rem; margin-bottom: .1rem; font-size: max(calc(.16 * var(--t)), 12px); font-weight: 700; color: var(--text-hi); }
+.room-list { display: flex; flex-direction: column; gap: .08rem; margin: 0; padding: 0; list-style: none; }
+.room-list__empty { padding: .18rem .12rem; text-align: center; font-size: max(calc(.15 * var(--t)), 11px); }
+.room-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .08rem .12rem;
+  padding: .1rem .12rem;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, .28);
+  transition: border-color var(--t-fast), background-color var(--t-fast);
+}
+.room-row:hover { border-color: var(--line-3); background: rgba(0, 0, 0, .42); }
+.room-row.is-playing { opacity: .8; }
+.room-row__main { display: flex; flex-direction: column; gap: .02rem; min-width: 1.15rem; }
+.room-row__code { font-size: max(calc(.2 * var(--t)), 13px); font-weight: 900; letter-spacing: .16em; color: var(--amber); }
+.room-row__host { font-size: max(calc(.13 * var(--t)), 10px); }
+.room-row__meta { display: flex; flex-direction: column; gap: .02rem; }
+.room-row__mode { font-size: max(calc(.13 * var(--t)), 10px); color: var(--text-md); }
+.room-row__diff { font-size: max(calc(.14 * var(--t)), 11px); font-weight: 700; color: var(--d-color, var(--amber)); }
+.room-row__nums { display: flex; align-items: center; gap: .12rem; margin-left: auto; font-size: max(calc(.15 * var(--t)), 11px); color: var(--text-md); }
+.room-row__spec { display: inline-flex; align-items: center; gap: .03rem; color: var(--text-lo); }
+.room-row__spec .icon { width: .14rem; height: .14rem; }
+.room-row__status {
+  padding: .02rem .1rem;
+  border: 1px solid var(--line-2);
+  font-size: max(calc(.13 * var(--t)), 10px);
+  color: var(--mint-400);
+}
+.room-row__status.is-playing { color: var(--amber); border-color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
+.room-row__actions { display: flex; gap: .08rem; }
+.room-row__actions .btn { height: max(.42rem, 28px); }
 
 /* ---- 选择模拟协议's cards when they do not fit their column (screens/lobby.js pickCardFit: data-fit), above 520 px tall --
    (§35.18's leftover there: at 大 / 特大, in a small window or a long language the list ran under 开始独立模拟 with 终极模拟

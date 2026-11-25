@@ -325,7 +325,9 @@ export function TitleScreen() {
   // a title in an alphabetic script (English, French …) is the big one in the display face and the wordmark above it
   // hides; a CJK / kana / Hangul title keeps the Chinese layout (shared/i18nPacks.js scriptOf — a pack needs no flag)
   const alphabetic = scriptOf(t('卫戍协议')) === 'alphabetic';
-  return html`<div class=${`screen title-screen${regStill ? ' is-reg-still' : ''}`}>
+  const showPwSet = pwSetOpen && hasAccount && !passwordMode;
+  const hasAlts = (!passwordMode && valid) || (passwordMode && !noPassword) || noPassword || (hasAccount && !passwordMode && !noPassword);
+  return html`<div class=${`screen title-screen${regStill ? ' is-reg-still' : ''}${passwordMode || noPassword ? ' is-expanded' : ''}${showPwSet ? ' has-pwset' : ''}`}>
     <div class=${`title-bg${bgLoaded || alliance || regStart ? ' has-art' : ''}${alliance ? ' has-alliance' : ''}${regStart ? ' has-reg' : ''}${ridgesLoaded ? ' has-ridges' : ''}`} aria-hidden="true">
       ${regStart ? html`<div class="title-reg" data-season=${REGULATION}>
         ${regStill ? html`<${RegulationStill} pack=${regPack} />` : regPack === null ? html`<${RegulationBackdrop} />` : null}
@@ -391,19 +393,21 @@ export function TitleScreen() {
           onInput=${setName} onEnter=${start} />
         ${passwordMode && !noPassword ? html`<${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"
           value=${password} maxLength=${128} onInput=${setPassword} onEnter=${start} />` : null}
-        ${noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${resetAccount}>
-          ${t('换一个代号')}</button>` : null}
         <${Button} variant="primary" size="xl" block=${true} iconRight="chevrons"
           disabled=${!valid || pending || (passwordMode && !noPassword && !password)} onClick=${start}>
           ${noPassword ? t('开始') : passwordMode ? t('用密码登录') : t('开始')}<//>
-        ${!passwordMode && valid ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAskPassword(true)}>
-          ${t('换设备了？用密码登录')}</button>` : null}
-        ${(passwordMode && !noPassword) || noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setForgotOpen(true)}>
-          ${noPassword ? t('忘记密码？申请重置') : t('忘记密码？')}</button>` : null}
-        ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAccountOpen(true)}>
-          ${t('账号')}</button>` : null}
-        ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setPwSetOpen(!pwSetOpen)}>
-          ${net.accountHasPassword ? t('修改密码') : t('设置密码')}</button>` : null}
+        ${hasAlts ? html`<div class="title-alts">
+          ${noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${resetAccount}>
+            ${t('换一个代号')}</button>` : null}
+          ${!passwordMode && valid ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAskPassword(true)}>
+            ${t('换设备了？用密码登录')}</button>` : null}
+          ${(passwordMode && !noPassword) || noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setForgotOpen(true)}>
+            ${noPassword ? t('忘记密码？申请重置') : t('忘记密码？')}</button>` : null}
+          ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setAccountOpen(true)}>
+            ${t('账号')}</button>` : null}
+          ${hasAccount && !passwordMode && !noPassword ? html`<button type="button" class="title-alt fsbtn tapx" onClick=${() => setPwSetOpen(!pwSetOpen)}>
+            ${net.accountHasPassword ? t('修改密码') : t('设置密码')}</button>` : null}
+        </div>` : null}
         ${pwSetOpen && hasAccount && !passwordMode ? html`<div class="title-pwset">
           <p class="title-pwset__hint t-lo">${t('设置密码后，换设备或清了浏览器数据时，可用「代号 + 密码」找回账号。')}</p>
           <${TextField} label=${t('密码')} micro="PASSWORD" size="lg" icon="key" type="password"

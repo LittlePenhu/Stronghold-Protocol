@@ -97,10 +97,14 @@ function WorldBoards({ world, gd }) {
     <${Section} title=${t('惯用干员')} micro="OPERATORS">
       <div class="st-tablewrap"><table class="st-table">
         <thead><tr><th>${t('名称')}</th><th class="num">${t('出现次数')}</th></tr></thead>
-        <tbody>${world.chars.slice(0, 30).map((r) => html`<tr key=${r.id}>
-          <td><span class="st-band"><${UnitThumb} id=${r.id} size="xs" />${gd.chess(r.id)?.name || r.id}</span></td>
-          <td class="num"><b>${fmtNum(r.count)}</b></td>
-        </tr>`)}</tbody>
+        <tbody>${world.chars.slice(0, 30).map((r) => {
+          const c = gd.chess(r.id);
+          const label = c ? (c.isDiy && c.tier ? `${c.name} (${c.tier}★)` : c.name) : r.id;
+          return html`<tr key=${r.id}>
+            <td><span class="st-band"><${UnitThumb} id=${r.id} size="xs" />${label}</span></td>
+            <td class="num"><b>${fmtNum(r.count)}</b></td>
+          </tr>`;
+        })}</tbody>
       </table></div>
     <//>`;
 }
@@ -132,16 +136,18 @@ function RanksScreen({ onClose }) {
   const d = state.data;
   const rows = d && d.players ? (d.players[tab] || []) : [];
 
-  return html`<div class="st" role="dialog" aria-modal="true">
+  return html`<div class="st st--ranks" role="dialog" aria-modal="true">
+    <div class="st__bg" aria-hidden="true"></div>
     <header class="st-top">
-      <${MicroLabel} tone="mint">SERVER RANKINGS<//>
-      <h2 class="st-title">${t('全服排行榜')}</h2>
-      <div class="st-top__r">
+      <div class="st-top__left"><${MicroLabel} tone="mint">SERVER RANKINGS<//></div>
+      <div class="st-top__center"><h2 class="st-title">${t('全服排行榜')}</h2></div>
+      <div class="st-top__right">
         <${Button} variant="ghost" size="sm" icon="close" onClick=${onClose} title=${t('关闭')}>${t('关闭')}<//>
       </div>
     </header>
-    <nav class="st-tabs">
-      ${TABS.map((x) => html`<button key=${x.id} type="button" class=${`st-tab${tab === x.id ? ' is-on' : ''}`}
+    <nav class="st-tabs" role="tablist">
+      ${TABS.map((x) => html`<button key=${x.id} type="button" role="tab" aria-selected=${tab === x.id}
+        class=${`st-tab${tab === x.id ? ' is-on' : ''}`}
         data-tab=${x.id} onClick=${() => ranksStore.set({ tab: x.id })}>${t(x.name)}</button>`)}
     </nav>
     <main class="st-body" data-tab=${tab}>

@@ -436,6 +436,11 @@
    ~0.65rem below the band) and covered the discs' tops; the theme preview draws the discs in front of them (the owner,
    2026-11-14 「还会挡道盟约那一行」, §37.201) */
 .gtop--pf ~ .gm__bonds { z-index: 2; }
+/* 可露希尔 / 乌萨斯齐心团的右上倒计时与准备按钮 Prefab 偏高，顺移生效中的效果列避免重叠（§37） */
+html[data-sp-theme="ac_s_closur"] .gtop--pf ~ .gm__effects { top: 3.35rem; }
+html[data-sp-theme="ac_s_closur"] .gm.has-readywhy .gtop--pf ~ .gm__effects { top: calc(3.35rem + max(.3rem, calc(16px * var(--sp-ui, 1)))); }
+html[data-sp-theme="ac_n_iron"] .gtop--pf ~ .gm__effects { top: 2.65rem; }
+html[data-sp-theme="ac_n_iron"] .gm.has-readywhy .gtop--pf ~ .gm__effects { top: calc(2.65rem + max(.3rem, calc(16px * var(--sp-ui, 1)))); }
 .readybtn.readybtn--pf:focus-visible { outline: 2px solid var(--mint-400); outline-offset: .03rem; }
 
 /* official banners (ui/prefab/banners.js) sit where the plates sit (.mpop: the middle of the field) */

@@ -357,6 +357,21 @@
 @media (max-width: 760px) {
   .st-top { padding: 0 .16rem; gap: .1rem; }
   .st-top::after { left: .16rem; right: .16rem; }
+  .st:not(.st--ranks) .st-top {
+    grid-template-columns: auto 1fr;
+    height: auto;
+    padding: .1rem .16rem .04rem;
+    gap: .08rem .1rem;
+  }
+  .st:not(.st--ranks) .st-top__left { grid-column: 1; grid-row: 1; }
+  .st:not(.st--ranks) .st-top__right { grid-column: 2; grid-row: 1; }
+  .st:not(.st--ranks) .st-top__center { grid-column: 1 / -1; grid-row: 2; width: 100%; align-items: flex-start; gap: .04rem; }
+  .st:not(.st--ranks) .st-tabs { width: 100%; }
+  .st:not(.st--ranks) .st-tab { flex: none; padding: .06rem .1rem; }
+  .st--ranks .st-top { grid-template-columns: minmax(0, 1fr) auto; }
+  .st--ranks .st-top__left { display: none; }
+  .st--ranks .st-top__center { align-items: flex-start; }
+  .st--ranks > .st-tabs { padding: .04rem .16rem 0; }
   .st-note { padding: .07rem .16rem; }
   .st-body { padding: .12rem .16rem .2rem; }
 }
@@ -368,6 +383,19 @@
 @media (prefers-reduced-motion: reduce) { .st { animation: none; } }
 
 /* ---- 排行 (rankings) --------------------------------------------------------------------------------------------- */
+
+/* 全服排行榜（screens/ranks.js）：独立页签栏不参与 flex 压缩，表格在居中容器内铺满 */
+.st-title { margin: 0; font-size: max(.28rem, 15px); font-weight: 900; letter-spacing: .1em; color: var(--text-hi); white-space: nowrap; }
+.st--ranks > .st-tabs {
+  position: relative; flex: none; gap: .08rem;
+  padding: .06rem .36rem 0;
+  border-bottom: 1px solid var(--line);
+  background: rgba(8, 10, 9, .65);
+}
+.st--ranks > .st-tabs .st-tab { flex: none; padding: .08rem .14rem; }
+.st--ranks .st-body > * { max-width: max(9.4rem, calc(560px * var(--sp-ui, 1))); }
+.st--ranks .st-table { max-width: none; }
+.st--ranks > .st-note { border-bottom: 0; border-top: 1px solid rgba(47, 58, 53, .6); }
 
 /* 一个分组一张表，表与小标题之间留一点呼吸 */
 .st-rank + .st-rank { margin-top: .16rem; }
